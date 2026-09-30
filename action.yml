@@ -1,0 +1,18 @@
+name: Design Guard
+description: Fail the build when UI code drifts from the approved design system.
+inputs:
+  path:
+    description: File or directory to lint
+    default: src
+  working-directory:
+    description: Project root (where design-guard.config lives)
+    default: .
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+    - shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: node "${{ github.action_path }}/scripts/ds-lint.mjs" "${{ inputs.path }}"

@@ -1,0 +1,10 @@
+{
+  "name": "design-guard",
+  "version": "0.1.0",
+  "description": "Keeps AI-generated UI inside your approved design system. A human-only @approved marker, plus a dependency-free linter.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "design-guard": "scripts/ds-lint.mjs" },
+  "scripts": { "test": "node --test scripts/ds-lint.test.mjs" },
+  "engines": { "node": ">=18" }
+}
