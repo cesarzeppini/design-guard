@@ -9,6 +9,22 @@ It has two halves that work together:
 - **The rules** (`skill/SKILL.md`): instructions for an AI assistant. Use only approved components, never override their appearance, park anything ambiguous instead of guessing.
 - **The linter** (`scripts/ds-lint.mjs`): a dependency-free Node script that catches the mechanical violations deterministically, so the result doesn't depend on the model remembering the rules.
 
+```
+$ node scripts/ds-lint.mjs src
+
+== raw interactive HTML element
+src/routes/dashboard.tsx:12:  <button onClick={() => save()}>Save</button>
+
+== typography utilities on semantic text elements
+src/routes/dashboard.tsx:9: <h1> text-2xl (text size) — the base layer already sets this
+
+== appearance override on a design-system component
+src/routes/dashboard.tsx:10: <Card> bg-muted (background)
+
+== component used but not marked @approved
+src/routes/dashboard.tsx  ->  components/ui/stat-tile
+```
+
 ## The core idea: approval is a marker, and only a human adds it
 
 A component is approved when its own file says so in the first 5 lines:
