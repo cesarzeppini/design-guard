@@ -1,3 +1,5 @@
+![Design Guard](assets/cover.png)
+
 # Design Guard
 
 **Keep AI-generated UI inside your design system.**
