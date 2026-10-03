@@ -417,3 +417,102 @@ test('reads design-guard.config, and prefers it over context/STACK.md', () => {
   assert.match(out, /ui\/card/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- --scan ----
+
+const scan = (root, args = []) => JSON.parse(run(root, ['--scan', ...args]).out);
+
+const SHADCN_BUTTON = `// @approved
+import { cva, type VariantProps } from "class-variance-authority";
+
+const buttonVariants = cva("inline-flex", {
+  variants: {
+    variant: { default: "bg-primary", outline: "border", ghost: "hover:bg-accent" },
+    size: { sm: "h-8", md: "h-10", lg: "h-12" },
+  },
+});
+
+export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof buttonVariants> {
+  asChild?: boolean;
+}
+export function Button(props: ButtonProps) { return null; }
+`;
+
+test('scan: statuses, usage counts and importers', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui\n',
+    'src/components/ui/button.tsx': SHADCN_BUTTON,
+    'src/components/ui/legacy.tsx': '// @approved\nexport const Legacy = () => null;\n',
+    'src/components/ui/popover.tsx': 'export const Popover = () => null;\n',
+    'src/components/ui/orphan.tsx': 'export const Orphan = () => null;\n',
+    'src/a.tsx': 'import { Button } from "@/components/ui/button";\nimport { Popover } from "@/components/ui/popover";\n',
+    'src/b.tsx': 'import { Button } from "~/components/ui/button";\n',
+  });
+  const by = Object.fromEntries(scan(root, ['src']).map((c) => [c.key, c]));
+  assert.equal(by['components/ui/button'].status, 'approved');
+  assert.equal(by['components/ui/button'].usageCount, 2);
+  assert.deepEqual(by['components/ui/button'].usedBy, ['src/a.tsx', 'src/b.tsx']);
+  assert.equal(by['components/ui/legacy'].status, 'approved-unused');
+  assert.equal(by['components/ui/popover'].status, 'unmarked-in-use');
+  assert.equal(by['components/ui/orphan'].status, 'unmarked-unused');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('scan: reads variants from cva and props from the Props interface', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui\n',
+    'src/components/ui/button.tsx': SHADCN_BUTTON,
+  });
+  const [button] = scan(root, ['src']);
+  assert.equal(button.name, 'Button');
+  assert.deepEqual(button.variants.variant, ['default', 'outline', 'ghost']);
+  assert.deepEqual(button.variants.size, ['sm', 'md', 'lg']);
+  assert.ok(button.props.some((p) => p.name === 'asChild' && p.optional));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('scan: reads string-union variants, including through a type alias', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui\n',
+    'src/components/ui/badge.tsx': [
+      '// @approved',
+      'type Tone = "info" | "warn"',
+      '  | "danger";',
+      'type BadgeProps = { tone: Tone; size?: "sm" | "lg"; label: string };',
+      'export const Badge = (p: BadgeProps) => null;',
+    ].join('\n'),
+  });
+  const [badge] = scan(root, ['src']);
+  assert.deepEqual(badge.props.map((p) => p.name), ['tone', 'size', 'label']);
+  assert.deepEqual(badge.variants.size, ['sm', 'lg']);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('scan: ignores tests and stories', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui\n',
+    'src/components/ui/button.tsx': '// @approved\nexport const Button = () => null;\n',
+    'src/components/ui/button.test.tsx': 'test("x", () => {});\n',
+    'src/components/ui/button.stories.tsx': 'export default {};\n',
+  });
+  assert.deepEqual(scan(root, ['src']).map((c) => c.key), ['components/ui/button']);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('scan: unstyled-by-design is declared next to the marker, only on approved components', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui\n',
+    'src/components/ui/slot.tsx': '// @approved — unstyled by design, a layout slot\nexport const Slot = () => null;\n',
+    'src/components/ui/raw.tsx': '// unstyled by design\nexport const Raw = () => null;\n',
+  });
+  const by = Object.fromEntries(scan(root, ['src']).map((c) => [c.name, c]));
+  assert.equal(by.Slot.unstyledByDesign, true);
+  assert.equal(by.Raw.unstyledByDesign, false);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('scan: a missing components directory yields an empty list, not a crash', () => {
+  const root = project({ 'design-guard.config': 'components: src/components/ui\n', 'src/a.tsx': 'export {};\n' });
+  assert.deepEqual(scan(root, ['src']), []);
+  rmSync(root, { recursive: true, force: true });
+});

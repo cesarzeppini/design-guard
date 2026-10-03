@@ -5,6 +5,7 @@
 //   ds-lint.mjs <file-or-dir> [...]          lint (defaults to src/)
 //   ds-lint.mjs --added-markers <git-range>  audit @approved markers added in a range
 //   ds-lint.mjs --registry [root]            inventory for the report's registry section
+//   ds-lint.mjs --scan [root]                every component as JSON: status, usage, props, variants
 //
 // Exit 1 when any hit is found, 0 when clean. --registry always exits 0 (inventory,
 // not a finding). --added-markers exits 1 when markers were added.
@@ -191,39 +192,202 @@ function addedMarkers(range) {
   return 0;
 }
 
-// ---- mode: --registry ----
+// ---- component scan ----
+// One pass over the project that everything else reads from: --registry, --scan,
+// and (later) the components page and the local UI. Each component gets a status,
+// its importers, and best-effort props/variants pulled from its source.
+//
+//   approved          carries @approved, and something imports it
+//   approved-unused   carries @approved, nothing imports it (a stale entry)
+//   unmarked-in-use   no marker, imported somewhere — a decision waiting
+//   unmarked-unused   no marker, not imported — inventory
 
-function registry(root) {
-  // Scan the WHOLE codebase for imports, not this run's diff: in a new project the
-  // entire codebase is the backlog, and a component in use since before the framework
-  // was installed appears in no diff and would never otherwise surface.
-  const tally = new Map(); // key -> Set of importing files
-  for (const hit of importsIn(filesUnder(root, LINT_EXTS))) {
-    if (!tally.has(hit.key)) tally.set(hit.key, new Set());
-    tally.get(hit.key).add(hit.file);
+const NON_COMPONENT_RE = /\.(test|spec|stories)\.[jt]sx?$|\.d\.ts$/;
+
+// Index of the brace that closes the one at `open`, skipping string literals.
+// -1 when unbalanced. Template literals with ${} nest braces; those are rare in
+// the prop/variant blocks this is used on, and a miss just yields no props.
+function matchBrace(text, open) {
+  let depth = 0;
+  let quote = null;
+  for (let i = open; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === '\\') i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') quote = c;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return i;
   }
+  return -1;
+}
 
-  const approved = [];
-  const usedUnmarked = [];
-  let unusedCount = 0;
+const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 
-  for (const dir of COMPONENT_DIRS) {
-    if (!isDir(dir)) continue;
-    for (const f of filesUnder(dir, COMPONENT_EXTS)) {
-      const key = componentKey(dir, f);
-      if (isMarked(f)) {
-        approved.push(key);
-      } else {
-        const n = tally.get(key)?.size ?? 0;
-        if (n > 0) usedUnmarked.push({ key, n });
-        else unusedCount++;
+// Split a member list at top level only: commas/semicolons/newlines inside nested
+// braces, parens or brackets belong to the member, not between members.
+function splitMembers(body) {
+  const out = [];
+  let depth = 0;
+  let quote = null;
+  let cur = '';
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (quote) {
+      cur += c;
+      if (c === '\\') cur += body[++i] ?? '';
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') quote = c;
+    if ('{[('.includes(c)) depth++;
+    else if ('}])'.includes(c)) depth--;
+    if (depth === 0 && (c === ',' || c === ';' || c === '\n')) {
+      if (cur.trim()) out.push(cur.trim());
+      cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
+const stringLiterals = (t) => [...t.matchAll(/["']([^"'\n]+)["']/g)].map((m) => m[1]);
+
+function propsOf(src) {
+  const props = [];
+  const seen = new Set();
+  const re = /(?:interface|type)\s+(\w*Props\w*)\b[^{=]*?(?:=\s*)?(?:[\w.<>,\s&]*?&\s*)?\{/g;
+  for (const m of src.matchAll(re)) {
+    const open = m.index + m[0].length - 1;
+    const close = matchBrace(src, open);
+    if (close < 0) continue;
+    for (const member of splitMembers(src.slice(open + 1, close))) {
+      const mm = member.match(/^(?:readonly\s+)?(['"]?[\w-]+['"]?)(\?)?\s*:\s*([\s\S]+)$/);
+      if (!mm) continue;
+      const name = mm[1].replace(/['"]/g, '');
+      if (seen.has(name)) continue;
+      seen.add(name);
+      props.push({ name, optional: !!mm[2], type: mm[3].replace(/\s+/g, ' ').trim() });
+    }
+  }
+  return props;
+}
+
+// Variant values from three places, merged: string unions on `variant`/`size`
+// props (following one `type X = "a" | "b"` alias), and cva-style
+// `variants: { variant: { default: ..., outline: ... } }` objects.
+function variantsOf(src, props) {
+  const out = {};
+  const add = (group, vals) => {
+    if (!vals.length) return;
+    out[group] = [...new Set([...(out[group] || []), ...vals])];
+  };
+
+  const aliasValues = (typeText) => {
+    const direct = stringLiterals(typeText);
+    if (direct.length) return direct;
+    const id = typeText.match(/^[A-Za-z_]\w*$/);
+    if (!id) return [];
+    const alias = src.match(new RegExp(`type\\s+${id[0]}\\s*=\\s*([^;\\n{]+(?:\\n\\s*\\|[^;\\n]+)*)`));
+    return alias ? stringLiterals(alias[1]) : [];
+  };
+  for (const p of props) if (p.name === 'variant' || p.name === 'size') add(p.name, aliasValues(p.type));
+
+  const cva = src.match(/variants\s*:\s*\{/);
+  if (cva) {
+    const open = cva.index + cva[0].length - 1;
+    const close = matchBrace(src, open);
+    if (close > 0) {
+      for (const group of splitMembers(stripComments(src.slice(open + 1, close)))) {
+        const gm = group.match(/^(\w+)\s*:\s*\{/);
+        if (!gm) continue;
+        const gOpen = group.indexOf('{', gm[0].length - 1);
+        const gClose = matchBrace(group, gOpen);
+        if (gClose < 0) continue;
+        const names = splitMembers(group.slice(gOpen + 1, gClose))
+          .map((v) => v.match(/^["']?([\w-]+)["']?\s*:/))
+          .filter(Boolean)
+          .map((v) => v[1]);
+        add(gm[1], names);
       }
     }
   }
+  return out;
+}
 
-  const uniq = (a) => [...new Set(a)].sort();
-  const approvedList = uniq(approved);
-  const usedList = uniq(usedUnmarked.map((u) => `${u.key.padEnd(44)} used in ${u.n} file(s)`));
+const exportedName = (src, file) => {
+  const m =
+    src.match(/export\s+(?:default\s+)?(?:function|class)\s+([A-Z]\w*)/) ||
+    src.match(/export\s+(?:const|let)\s+([A-Z]\w*)\s*[=:]/);
+  return m ? m[1] : basename(file).replace(/\.[^.]+$/, '');
+};
+
+function scanComponents(root = '.') {
+  // Scan the WHOLE codebase for imports, not a diff: in a new project the entire
+  // codebase is the backlog, and a component in use since before the guard was
+  // installed appears in no diff and would never otherwise surface.
+  const importers = new Map(); // key -> Set of importing files
+  for (const hit of importsIn(filesUnder(root, LINT_EXTS))) {
+    if (!importers.has(hit.key)) importers.set(hit.key, new Set());
+    importers.get(hit.key).add(hit.file);
+  }
+
+  const components = [];
+  for (const dir of COMPONENT_DIRS) {
+    if (!isDir(dir)) continue;
+    for (const file of filesUnder(dir, COMPONENT_EXTS)) {
+      if (NON_COMPONENT_RE.test(file)) continue;
+      const key = componentKey(dir, file);
+      const usedBy = [...(importers.get(key) ?? [])].filter((f) => f !== file).sort();
+      const approved = isMarked(file);
+      let src = '';
+      try {
+        src = readFileSync(file, 'utf8');
+      } catch {
+        // unreadable file: report it with no props rather than dropping it
+      }
+      const clean = stripComments(src);
+      const props = propsOf(clean);
+      const head = src.split('\n').slice(0, MARKER_WINDOW + 2).join('\n');
+      components.push({
+        key,
+        name: exportedName(clean, file),
+        file,
+        dir,
+        approved,
+        unstyledByDesign: approved && /unstyled/i.test(head),
+        usageCount: usedBy.length,
+        usedBy,
+        status: approved
+          ? usedBy.length ? 'approved' : 'approved-unused'
+          : usedBy.length ? 'unmarked-in-use' : 'unmarked-unused',
+        props,
+        variants: variantsOf(clean, props),
+      });
+    }
+  }
+  return components.sort((a, b) => a.key.localeCompare(b.key));
+}
+
+// ---- mode: --scan ----
+
+function scanMode(root) {
+  console.log(JSON.stringify(scanComponents(root), null, 2));
+  return 0;
+}
+
+// ---- mode: --registry ----
+
+function registry(root) {
+  const all = scanComponents(root);
+  const approvedList = all.filter((c) => c.approved).map((c) => c.key);
+  const used = all.filter((c) => c.status === 'unmarked-in-use');
+  const unusedCount = all.filter((c) => c.status === 'unmarked-unused').length;
+  const usedList = used.map((u) => `${u.key.padEnd(44)} used in ${u.usageCount} file(s)`);
 
   console.log('== component registry');
   console.log('');
@@ -588,6 +752,8 @@ const argv = process.argv.slice(2);
 
 if (argv[0] === '--added-markers') {
   process.exit(addedMarkers(argv[1] || 'main...HEAD'));
+} else if (argv[0] === '--scan') {
+  process.exit(scanMode(argv[1] || '.'));
 } else if (argv[0] === '--registry') {
   process.exit(registry(argv[1] || '.'));
 } else {
