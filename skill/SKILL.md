@@ -26,6 +26,15 @@ Build the approved list at check time by scanning the directories in `components
 
 Imports are matched by directory tail rather than by a fixed alias, so `@/components/ui/x`, `~/components/ui/x` and `../../components/ui/x` all resolve to the same component. A project that uses no alias at all works the same way.
 
+### How to approve and revoke (when the human asks)
+
+- **Approve a component** ("mark Button as approved"): open that component's file, add `// @approved` as the **first line**, change nothing else. If the file starts with something that must stay first (a shebang), put it on the next line. Tell the human you did it.
+- **Approve several at once** ("approve everything in use", "use what we have as the baseline"): do the same for each file they name. If they didn't name files, list the unmarked components that are imported somewhere (`node scripts/ds-lint.mjs --registry`, or read the imports yourself) and ask them to confirm the list before touching anything.
+- **Revoke** ("remove approval from Button"): delete the `@approved` marker line from that file, change nothing else, and say how many files import it, because they will be flagged from now on.
+- With a terminal you can use `node scripts/ds-lint.mjs --approve <file>` / `--unapprove <file>`. They do exactly the above, and refuse any file outside the component directories.
+
+**First run on an existing project:** nothing is approved yet, so everything in use will be flagged. Don't try to fix that by approving things yourself. Show the human the list, most-used first, and let them choose, or offer the "approve everything in use" baseline above.
+
 ### Agents never add the marker
 
 **Only the human decides what is approved.** You may add `@approved` when — and only when — the human asks for it in that moment ("mark Button as approved"). Never on your own initiative: not while doing other work, not as the fix for a flagged item, not because a component looks finished or well-built, not "while I'm in the file anyway."
@@ -153,22 +162,31 @@ Three groups, and the split is the point:
 
 This is an inventory, not a finding: it doesn't block, and a long list on the first run is expected. It shrinks as components get marked.
 
-## Documenting the system
+## The /components page
 
-On request — "generate the design system page," "show me what's approved" — build a `/components` route documenting what's *actually* approved right now. A living reference, regenerated on demand, never a hand-maintained registry and never the source of approval.
+On request — "add the components page", "show me what's approved" — add the Design Guard page to the project. It is a route inside their own product, **dev-only**, that reads the project's source and shows: stats, "Decisions waiting" (unmarked components in use, most-used first), the approved list, and unused components, each with a badge, variants, props and where it's used. A first-time guide explains approving, and each component has an **Approve / Revoke** button that copies a prompt for the human to paste into the chat. A baseline button copies one prompt approving everything in use.
 
-- **Components** — one entry per `@approved` component, found by scanning. Live rendering of each variant and size, the props it accepts, one usage snippet.
-- **Colors** — a swatch, the token name, the value, read from the project's tokens file.
-- **Typography** — each level of the scale shown as its real element, with size / weight / leading.
-- **Spacing, radius, shadow** — the scale steps that actually exist.
+Setup, for a Vite + React + TypeScript project:
+
+1. Create `src/design-guard/` and copy in these three files from the design-guard repo: `template/Components.tsx`, `scripts/scan-core.mjs`, `scripts/scan-core.d.mts`.
+2. In `Components.tsx`, set `COMPONENT_DIRS` to the project's component directories (the same as `components:` in `design-guard.config`).
+3. Register the route **only in development**, so it never ships:
+
+```tsx
+import { lazy, Suspense } from 'react';
+const Components = import.meta.env.DEV ? lazy(() => import('./design-guard/Components')) : null;
+
+// inside the router:
+{Components && <Route path="/components" element={<Suspense fallback={null}><Components /></Suspense>} />}
+```
+
+4. Keep `src/design-guard/` out of the lint path. It is deliberately plain HTML and doesn't use the project's components.
 
 Rules for the page:
 
-- Everything on it is read from source — nothing typed by hand. If it can't be derived, leave it off.
-- Built exclusively from approved components; it must pass this check itself.
-- Never invent a component to fill a gap — render what's actually approved.
-
-This is a project's own route, built with the project's own components, not shared infrastructure. Building it is itself a UI-touching change, so it goes through whatever process the project uses for any other feature.
+- Everything on it is read from source. Nothing is typed by hand.
+- It never approves anything itself. Its buttons only copy a prompt; the human sends it and the assistant edits the file.
+- Non-Vite projects (Next.js etc.) don't have `import.meta.glob`; generate the data with `node scripts/ds-lint.mjs --scan` instead, and keep the same dev-only rule.
 
 ## Report format
 

@@ -69,6 +69,18 @@ node ../../scripts/ds-lint.mjs --registry src
 
 prints what's approved, what's unmarked but in use (each one a decision waiting for you), and a count of unmarked-and-unused files.
 
+## The /components page
+
+A dev-only route inside your own project that shows what's approved and what's waiting for a decision — status badges, usage counts, variants and props, adoption stats, and an Approve / Revoke button on every component.
+
+The buttons don't edit files. They **copy a prompt**; you paste it into your AI chat (Lovable, Claude Code, Cursor…) and the assistant adds or removes the marker. You decide, the assistant types. A first-time guide on the page explains this, and an **Approve all in use** button sets your current components as the starting point so only *new* drift gets flagged.
+
+Add it by pasting this into your AI assistant:
+
+> Add the Design Guard components page to this project. Copy `template/Components.tsx`, `scripts/scan-core.mjs` and `scripts/scan-core.d.mts` from https://github.com/cesarzeppini/design-guard into `src/design-guard/`. Set `COMPONENT_DIRS` in `Components.tsx` to my components folder. Register `/components` as a route **only when `import.meta.env.DEV` is true** (lazy-loaded), so it never ships to production. Don't use my design-system components inside it.
+
+Needs Vite + React + TypeScript. Not yet verified inside Lovable — tell me what breaks.
+
 ## Install
 
 The linter needs Node 18+ and nothing else. No `npm install`.
@@ -115,6 +127,19 @@ typography-base: true                # does your CSS base layer style h1–h6, p
 
 It falls back to `context/STACK.md` if that's where you keep project facts.
 
+## Commands
+
+```bash
+node scripts/ds-lint.mjs src                    # lint
+node scripts/ds-lint.mjs --registry             # approved / in use / unused
+node scripts/ds-lint.mjs --scan                 # every component as JSON
+node scripts/ds-lint.mjs --approve <file...>    # add the @approved marker
+node scripts/ds-lint.mjs --unapprove <file...>  # remove it
+node scripts/ds-lint.mjs --added-markers main...HEAD
+```
+
+`--approve` only writes inside your configured component directories and refuses anything else. An optional `--serve` mode exists for one-click buttons on the page, but it needs Node running next to your dev server and is not required.
+
 ## Exit codes
 
 `0` clean · `1` violations found. `--registry` always exits `0` (inventory, not a finding). `--added-markers <range>` exits `1` if any markers were added.
@@ -126,6 +151,9 @@ The first version was a shell script and shipped four bugs of kinds only shell h
 ## Known limits
 
 - React/JSX (`.tsx`, `.jsx`) only today.
+- The components page needs Vite (it reads source with `import.meta.glob`). Next.js and others would need the `--scan` JSON instead.
+- A design system that lives in a different repo isn't seen by the guard — it only checks components in your configured local directories.
+- The page's stats don't yet count appearance overrides, only raw HTML elements.
 - A literal `>` inside a plain string prop (`title="a > b"`) can end the tag scan early.
 - It checks what's written, not what renders. It won't catch an override built from a dynamic `className` expression.
 

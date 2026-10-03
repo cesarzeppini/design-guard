@@ -28,6 +28,9 @@ const approvePrompt = (c: ComponentInfo) =>
 const revokePrompt = (c: ComponentInfo) =>
   `Remove the "@approved" marker from ${c.file}. Change nothing else.` +
   (c.usageCount ? ` (${c.usageCount} file(s) import it and will be flagged afterwards.)` : '');
+const baselinePrompt = (list: ComponentInfo[]) =>
+  `Add "// @approved" as the first line of each of these files. Change nothing else in them:\n` +
+  list.map((c) => `- ${c.file}`).join('\n');
 const command = (c: ComponentInfo) => `node scripts/ds-lint.mjs --${c.approved ? 'unapprove' : 'approve'} ${c.file}`;
 
 export default function Components() {
@@ -78,6 +81,15 @@ export default function Components() {
   };
 
   const direct = live && !!token;
+
+  // First-run guide. Remembered per browser; the "How this works" link reopens it.
+  const [guide, setGuide] = useState(() => {
+    try { return localStorage.getItem('dg-guide-done') !== '1'; } catch { return true; }
+  });
+  const closeGuide = () => {
+    setGuide(false);
+    try { localStorage.setItem('dg-guide-done', '1'); } catch { /* fine: it will show again next visit */ }
+  };
 
   const copy = async (id: string, text: string) => {
     try {
@@ -137,8 +149,11 @@ export default function Components() {
             onClick={() => (direct ? act(c) : copy(c.key, c.approved ? revokePrompt(c) : approvePrompt(c)))}
             title={direct ? 'Edits the file now' : 'Copies a prompt — paste it to your AI assistant'}
           >
-            {copied === c.key ? 'Prompt copied ✓' : c.approved ? 'Revoke approval' : 'Approve'}
+            {copied === c.key ? 'Copied ✓' : c.approved ? 'Revoke approval' : 'Approve'}
           </button>
+          {copied === c.key && !direct && (
+            <span className="dg-note">Prompt copied. Paste it into your AI chat and send it.</span>
+          )}
           {note?.key === c.key && <span className={note.bad ? 'dg-note dg-bad' : 'dg-note'}>{note.text}</span>}
           {!direct && (
             <button className="dg-link" onClick={() => copy(c.key + ':cmd', command(c))} title={command(c)}>
@@ -150,9 +165,9 @@ export default function Components() {
     );
   };
 
-  const section = (title: string, hint: string, list: ComponentInfo[], empty: string) => (
+  const section = (title: string, hint: string, list: ComponentInfo[], empty: string, extra?: React.ReactNode) => (
     <section className="dg-section">
-      <h2>{title} <span className="dg-count">{list.length}</span></h2>
+      <h2>{title} <span className="dg-count">{list.length}</span> {extra}</h2>
       <p className="dg-hint">{hint}</p>
       {list.length ? <ul className="dg-list">{list.map(row)}</ul> : <p className="dg-empty">{empty}</p>}
     </section>
@@ -169,9 +184,33 @@ export default function Components() {
         <h1>Components</h1>
         <p className="dg-hint">
           Dev-only view of your design system, read live from source. Approving or revoking copies a prompt for
-          your AI assistant — only a human decides what is approved.
+          your AI assistant — only a human decides what is approved.{' '}
+          {!guide && <button className="dg-link" onClick={() => setGuide(true)}>How this works</button>}
         </p>
       </header>
+
+      {guide && (
+        <section className="dg-guide">
+          <h2>Before you start — 3 things to know</h2>
+          <ol>
+            <li>
+              <strong>Approved means one comment line.</strong> A component is part of your design system when its
+              file starts with <code>// @approved</code>. Nothing else makes it approved.
+            </li>
+            <li>
+              <strong>You decide, your AI does the typing.</strong> Click <em>Approve</em> on a component. A prompt is
+              copied. Paste it into your AI chat (Lovable, Claude Code…) and send it — the AI adds the line. Then
+              this page updates.
+            </li>
+            <li>
+              <strong>Start with the most-used.</strong> Below, “Decisions waiting” lists what your project already
+              uses, biggest first. If you are happy with how they look today, use <em>Approve all in use</em> to make
+              them your starting point. From then on, anything new that drifts gets flagged.
+            </li>
+          </ol>
+          <button className="dg-btn dg-primary" onClick={closeGuide}>Got it</button>
+        </section>
+      )}
 
       {live && !token && (
         <form className="dg-banner" onSubmit={(e) => { e.preventDefault(); if (draft.trim()) { saveToken(draft.trim()); setDraft(''); } }}>
@@ -196,7 +235,12 @@ export default function Components() {
         </p>
       )}
 
-      {section('Decisions waiting', 'In use but not approved. Most-used first: approving or replacing these removes the most drift.', waiting, 'Nothing waiting. Every component in use is approved.')}
+      {section('Decisions waiting', 'In use but not approved. Most-used first: approving or replacing these removes the most drift.', waiting, 'Nothing waiting. Every component in use is approved.',
+        waiting.length > 1 && (
+          <button className="dg-btn" style={{ marginLeft: 8 }} onClick={() => copy('baseline', baselinePrompt(waiting))}>
+            {copied === 'baseline' ? 'Copied ✓ — paste it into your AI chat' : `Approve all ${waiting.length} in use`}
+          </button>
+        ))}
       {section('Approved', 'The current design system.', approved, 'Nothing approved yet — expected on a new project. Start with the most-used component above.')}
       {unused.length > 0 && (
         <details className="dg-section">
@@ -232,6 +276,7 @@ body:has(.dg){background:#fff}@media (prefers-color-scheme:dark){body:has(.dg){b
 .dg-actions{display:grid;gap:4px;justify-items:end;flex:none}
 .dg-btn{font:inherit;font-weight:600;padding:7px 12px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--fg);cursor:pointer}
 .dg-btn.dg-primary{background:var(--pri);color:var(--prifg);border-color:var(--pri)}
+.dg-guide{margin-top:18px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}.dg-guide ol{margin:10px 0 14px;padding-left:20px;display:grid;gap:8px}.dg-guide code{background:var(--bg);padding:1px 5px;border-radius:5px;border:1px solid var(--line)}
 .dg-banner{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--warnbg);color:var(--warn);border-radius:12px;padding:12px 14px;margin-top:18px}.dg-banner input{font:12px ui-monospace,Menlo,monospace;padding:7px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);min-width:260px;flex:1}
 .dg-live{color:var(--ok);font-size:12px;margin:14px 0 0}.dg-note{font-size:12px;color:var(--ok)}.dg-note.dg-bad{color:var(--warn)}
 .dg-link{font:inherit;font-size:12px;background:none;border:0;color:var(--mut);cursor:pointer;text-decoration:underline}
