@@ -5,6 +5,8 @@
 //   ds-lint.mjs <file-or-dir> [...]          lint (defaults to src/)
 //   ds-lint.mjs --added-markers <git-range>  audit @approved markers added in a range
 //   ds-lint.mjs --registry [root]            inventory for the report's registry section
+//   ds-lint.mjs --approve <file...>          add the @approved marker (a human's act — see SKILL.md)
+//   ds-lint.mjs --unapprove <file...>        remove it
 //   ds-lint.mjs --scan [root]                every component as JSON: status, usage, props, variants
 //
 // Exit 1 when any hit is found, 0 when clean. --registry always exits 0 (inventory,
@@ -15,8 +17,8 @@
 // delimiter colliding with data containing "|", a path prefix leaking into a
 // pattern match, and grep's -i flag applying in one branch but not the other.
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { readFileSync, readdirSync, statSync, writeFileSync, realpathSync } from 'node:fs';
+import { join, basename, resolve, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 // A component is approved when @approved appears in a comment within the first
@@ -414,6 +416,124 @@ function registry(root) {
   return 0;
 }
 
+// ---- marker edit ----
+// The only code in this file that writes to a project file, so it is deliberately
+// narrow: it touches nothing but a configured component file, inserts or removes
+// nothing but the marker, and verifies the result before writing.
+
+const MARKER_LINE = '// @approved';
+
+// A line that is nothing but a comment carrying the marker (and maybe a note after
+// it, like "— unstyled by design"): `// @approved`, `/* @approved */`,
+// `{/* @approved */}`, ` * @approved`, `# @approved`.
+const MARKER_ONLY_LINE_RE = /^\s*(?:\{\s*)?(?:\/\/+|\/\*+|\*+|#+)?\s*@approved(?:\s.*?)?(?:\*\/)?\s*\}?\s*$/;
+
+class MarkerError extends Error {}
+
+// Resolve `file` and make sure it is a real file inside a configured component
+// directory. Anything else is refused: the tool must not be a way to write markers
+// (or anything) into arbitrary paths.
+function resolveComponentFile(file, root = process.cwd()) {
+  let real;
+  try {
+    real = realpathSync(resolve(root, file));
+  } catch {
+    throw new MarkerError(`no such file: ${file}`);
+  }
+  if (!statSync(real).isFile()) throw new MarkerError(`not a file: ${file}`);
+  if (!COMPONENT_EXTS.some((x) => real.endsWith(x))) {
+    throw new MarkerError(`not a component file (${COMPONENT_EXTS.join(', ')}): ${file}`);
+  }
+  const rootReal = realpathSync(root);
+  const inside = COMPONENT_DIRS.some((d) => {
+    try {
+      const dirReal = realpathSync(resolve(rootReal, d));
+      return real === dirReal || real.startsWith(dirReal + sep);
+    } catch {
+      return false;
+    }
+  });
+  if (!inside) {
+    throw new MarkerError(`${file} is not inside a configured components directory (${COMPONENT_DIRS.join(', ') || 'none'})`);
+  }
+  return real;
+}
+
+const hasMarker = (lines) => lines.slice(0, MARKER_WINDOW).some((l) => MARKER_RE.test(l));
+
+// Pure: text in, text out. Keeps the file's own line endings and BOM, and slots in
+// after a shebang. Returns the same text when the marker is already in the window.
+function withMarker(text) {
+  const bom = text.startsWith('﻿') ? '﻿' : '';
+  const body = bom ? text.slice(1) : text;
+  const eol = body.includes('\r\n') ? '\r\n' : '\n';
+  const lines = body.split(eol);
+  if (hasMarker(lines)) return text;
+  const at = lines[0].startsWith('#!') ? 1 : 0;
+  lines.splice(at, 0, MARKER_LINE);
+  return bom + lines.join(eol);
+}
+
+// Pure: removes every marker inside the window. A comment-only line is dropped whole;
+// a marker sharing a line with anything else is cut out and the rest left alone.
+function withoutMarker(text) {
+  const bom = text.startsWith('﻿') ? '﻿' : '';
+  const body = bom ? text.slice(1) : text;
+  const eol = body.includes('\r\n') ? '\r\n' : '\n';
+  const lines = body.split(eol);
+  const out = [];
+  lines.forEach((line, i) => {
+    if (i >= MARKER_WINDOW || !MARKER_RE.test(line)) return out.push(line);
+    if (MARKER_ONLY_LINE_RE.test(line)) return; // drop the line
+    out.push(line.replace(/@approved/, '').replace(/[ \t]{2,}/g, ' ').replace(/[ \t]+$/, ''));
+  });
+  return bom + out.join(eol);
+}
+
+// Returns { changed, message, usedBy } or throws MarkerError. Verifies the outcome
+// from the new text before writing, so a bad edit is refused rather than saved.
+function setApproval(file, approved, root = process.cwd()) {
+  const real = resolveComponentFile(file, root);
+  const before = readFileSync(real, 'utf8');
+  const wasMarked = hasMarker(before.replace(/^﻿/, '').split(/\r?\n/));
+  if (wasMarked === approved) {
+    return { changed: false, message: `${file} is already ${approved ? 'approved' : 'unapproved'}` };
+  }
+  const after = approved ? withMarker(before) : withoutMarker(before);
+  const nowMarked = hasMarker(after.replace(/^﻿/, '').split(/\r?\n/));
+  if (nowMarked !== approved) throw new MarkerError(`could not ${approved ? 'add' : 'remove'} the marker in ${file}; file left untouched`);
+  writeFileSync(real, after);
+  return { changed: true, message: `${file} is now ${approved ? 'approved' : 'unapproved'}` };
+}
+
+// ---- mode: --approve / --unapprove ----
+// Human-run. The framework's rule is that an agent adds a marker only when asked
+// to in that moment; this is the same act, one command long.
+
+function approveMode(approved, files) {
+  if (!files.length) {
+    console.error(`ds-lint: ${approved ? '--approve' : '--unapprove'} needs a component file`);
+    return 2;
+  }
+  let code = 0;
+  for (const file of files) {
+    try {
+      let note = '';
+      if (!approved) {
+        const key = scanComponents('.').find((c) => resolve(c.file) === resolve(file));
+        if (key?.usageCount) note = ` — ${key.usageCount} file(s) import it and will now be flagged`;
+      }
+      const r = setApproval(file, approved);
+      console.log(r.message + (r.changed ? note : ''));
+    } catch (e) {
+      if (!(e instanceof MarkerError)) throw e;
+      console.error(`ds-lint: ${e.message}`);
+      code = 2;
+    }
+  }
+  return code;
+}
+
 // ---- mode: lint ----
 
 const PATTERNS = [
@@ -757,6 +877,8 @@ const argv = process.argv.slice(2);
 
 if (argv[0] === '--added-markers') {
   process.exit(addedMarkers(argv[1] || 'main...HEAD'));
+} else if (argv[0] === '--approve' || argv[0] === '--unapprove') {
+  process.exit(approveMode(argv[0] === '--approve', argv.slice(1)));
 } else if (argv[0] === '--scan') {
   process.exit(scanMode(argv[1] || '.'));
 } else if (argv[0] === '--registry') {

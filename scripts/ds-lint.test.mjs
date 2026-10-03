@@ -528,3 +528,185 @@ test('scan: reads props from an inline annotation when there is no Props type', 
   assert.deepEqual(button.variants.variant, ['primary', 'secondary']);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- --approve / --unapprove ----
+// These write to project files, so the cases are about what must NOT change as much
+// as what must.
+
+import { readFileSync as readFile, symlinkSync } from 'node:fs';
+
+const MK = { 'design-guard.config': 'components: src/components/ui\n' };
+const read = (root, f) => readFile(join(root, f), 'utf8');
+const BTN = 'src/components/ui/button.tsx';
+
+test('approve: inserts the marker as line 1 and leaves the rest byte-identical', () => {
+  const body = 'export const Button = () => null;\n';
+  const root = project({ ...MK, [BTN]: body });
+  const { code, out } = run(root, ['--approve', BTN]);
+  assert.equal(code, 0);
+  assert.match(out, /now approved/);
+  assert.equal(read(root, BTN), '// @approved\n' + body);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('approve: is idempotent', () => {
+  const root = project({ ...MK, [BTN]: '// @approved\nexport const Button = () => null;\n' });
+  const before = read(root, BTN);
+  const { code, out } = run(root, ['--approve', BTN]);
+  assert.equal(code, 0);
+  assert.match(out, /already approved/);
+  assert.equal(read(root, BTN), before);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('approve: keeps CRLF line endings', () => {
+  const root = project({ ...MK, [BTN]: 'import x from "x";\r\nexport const Button = () => null;\r\n' });
+  run(root, ['--approve', BTN]);
+  const text = read(root, BTN);
+  assert.equal(text, '// @approved\r\nimport x from "x";\r\nexport const Button = () => null;\r\n');
+  assert.ok(!/[^\r]\n/.test(text), 'no bare LF introduced');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('approve: keeps a BOM first, and goes after a shebang', () => {
+  const bom = project({ ...MK, [BTN]: '﻿export const Button = () => null;\n' });
+  run(bom, ['--approve', BTN]);
+  assert.equal(read(bom, BTN), '﻿// @approved\nexport const Button = () => null;\n');
+  const sb = project({ ...MK, [BTN]: '#!/usr/bin/env node\nexport const Button = () => null;\n' });
+  run(sb, ['--approve', BTN]);
+  assert.equal(read(sb, BTN), '#!/usr/bin/env node\n// @approved\nexport const Button = () => null;\n');
+  rmSync(bom, { recursive: true, force: true });
+  rmSync(sb, { recursive: true, force: true });
+});
+
+test('approve: a "use client" directive is still intact and the marker is within the window', () => {
+  const root = project({ ...MK, [BTN]: '"use client";\nexport const Button = () => null;\n' });
+  run(root, ['--approve', BTN]);
+  const lines = read(root, BTN).split('\n');
+  assert.equal(lines[0], '// @approved');
+  assert.equal(lines[1], '"use client";');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('approve: a marker below line 5 does not count, so approve adds one in the window', () => {
+  const late = ['a', 'b', 'c', 'd', 'e', 'f', '// @approved', 'export const Button = () => null;'].join('\n') + '\n';
+  const root = project({ ...MK, [BTN]: late });
+  assert.equal(scan(root, ['src'])[0].approved, false);
+  run(root, ['--approve', BTN]);
+  assert.equal(scan(root, ['src'])[0].approved, true);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('unapprove: drops a comment-only marker line', () => {
+  const root = project({ ...MK, [BTN]: '// @approved\nexport const Button = () => null;\n' });
+  const { code, out } = run(root, ['--unapprove', BTN]);
+  assert.equal(code, 0);
+  assert.match(out, /now unapproved/);
+  assert.equal(read(root, BTN), 'export const Button = () => null;\n');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('unapprove: handles block, JSX and note-carrying marker styles', () => {
+  const cases = [
+    ['/* @approved */\nexport const A = 1;\n', 'export const A = 1;\n'],
+    ['{/* @approved */}\nexport const A = 1;\n', 'export const A = 1;\n'],
+    ['// @approved — unstyled by design\nexport const A = 1;\n', 'export const A = 1;\n'],
+    ['/**\n * @approved\n */\nexport const A = 1;\n', '/**\n */\nexport const A = 1;\n'],
+  ];
+  for (const [input, expected] of cases) {
+    const root = project({ ...MK, [BTN]: input });
+    run(root, ['--unapprove', BTN]);
+    assert.equal(read(root, BTN), expected, JSON.stringify(input));
+    assert.equal(scan(root, ['src'])[0].approved, false);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('unapprove: a marker sharing a line with other text is cut out, the rest stays', () => {
+  const root = project({ ...MK, [BTN]: '// Primary button @approved\nexport const Button = () => null;\n' });
+  run(root, ['--unapprove', BTN]);
+  assert.equal(read(root, BTN), '// Primary button\nexport const Button = () => null;\n');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('unapprove: an unapproved file is left alone, and an @approved below the window is not touched', () => {
+  const late = ['a', 'b', 'c', 'd', 'e', 'f', '// @approved', 'export const Button = () => null;'].join('\n') + '\n';
+  const root = project({ ...MK, [BTN]: late });
+  const { out } = run(root, ['--unapprove', BTN]);
+  assert.match(out, /already unapproved/);
+  assert.equal(read(root, BTN), late);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('unapprove: says how many files import the component', () => {
+  const root = project({
+    ...MK,
+    [BTN]: '// @approved\nexport const Button = () => null;\n',
+    'src/a.tsx': 'import { Button } from "@/components/ui/button";\n',
+    'src/b.tsx': 'import { Button } from "@/components/ui/button";\n',
+  });
+  const { out } = run(root, ['--unapprove', BTN]);
+  assert.match(out, /2 file\(s\) import it and will now be flagged/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('approve then unapprove restores the file byte for byte', () => {
+  const original = '"use client";\r\nimport x from "x";\r\nexport const Button = () => null;\r\n';
+  const root = project({ ...MK, [BTN]: original });
+  run(root, ['--approve', BTN]);
+  run(root, ['--unapprove', BTN]);
+  assert.equal(read(root, BTN), original);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('refuses files outside the configured components directories', () => {
+  const root = project({ ...MK, [BTN]: 'export {};\n', 'src/routes/page.tsx': 'export {};\n', 'secrets.ts': 'export {};\n' });
+  for (const f of ['src/routes/page.tsx', 'secrets.ts', 'src/components/ui/../../../secrets.ts']) {
+    const { code, out } = run(root, ['--approve', f]);
+    assert.equal(code, 2, f);
+    assert.match(out, /not inside a configured components directory/);
+  }
+  assert.equal(read(root, 'src/routes/page.tsx'), 'export {};\n');
+  assert.equal(read(root, 'secrets.ts'), 'export {};\n');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('refuses a symlink that points out of the components directory', () => {
+  const root = project({ ...MK, [BTN]: 'export {};\n', 'secrets.ts': 'export {};\n' });
+  symlinkSync(join(root, 'secrets.ts'), join(root, 'src/components/ui/link.tsx'));
+  const { code } = run(root, ['--approve', 'src/components/ui/link.tsx']);
+  assert.equal(code, 2);
+  assert.equal(read(root, 'secrets.ts'), 'export {};\n');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('refuses missing files and non-component extensions', () => {
+  const root = project({ ...MK, 'src/components/ui/styles.css': 'a{}\n' });
+  assert.equal(run(root, ['--approve', 'src/components/ui/nope.tsx']).code, 2);
+  assert.equal(run(root, ['--approve', 'src/components/ui/styles.css']).code, 2);
+  assert.equal(run(root, ['--approve']).code, 2);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('one bad path does not stop the others, and the exit code reports it', () => {
+  const root = project({ ...MK, [BTN]: 'export const Button = () => null;\n', 'src/components/ui/card.tsx': 'export const Card = () => null;\n' });
+  const { code } = run(root, ['--approve', 'src/components/ui/nope.tsx', BTN, 'src/components/ui/card.tsx']);
+  assert.equal(code, 2);
+  assert.match(read(root, BTN), /^\/\/ @approved\n/);
+  assert.match(read(root, 'src/components/ui/card.tsx'), /^\/\/ @approved\n/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers sees a marker added by --approve', () => {
+  const root = project({ ...MK, [BTN]: 'export const Button = () => null;\n' });
+  const git = (...a) => execFileSync('git', a, { cwd: root, encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '-A');
+  git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'base');
+  run(root, ['--approve', BTN]);
+  git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'approve');
+  const { code, out } = run(root, ['--added-markers', 'HEAD~1...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /button\.tsx/);
+  rmSync(root, { recursive: true, force: true });
+});
