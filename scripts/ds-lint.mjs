@@ -261,8 +261,13 @@ function propsOf(src) {
   const props = [];
   const seen = new Set();
   const re = /(?:interface|type)\s+(\w*Props\w*)\b[^{=]*?(?:=\s*)?(?:[\w.<>,\s&]*?&\s*)?\{/g;
-  for (const m of src.matchAll(re)) {
-    const open = m.index + m[0].length - 1;
+  const opens = [...src.matchAll(re)].map((m) => m.index + m[0].length - 1);
+  // No named Props type: fall back to an inline annotation, `({ a, b }: { a: string })`.
+  if (!opens.length) {
+    const inline = src.match(/\}\s*:\s*\{/);
+    if (inline) opens.push(inline.index + inline[0].length - 1);
+  }
+  for (const open of opens) {
     const close = matchBrace(src, open);
     if (close < 0) continue;
     for (const member of splitMembers(src.slice(open + 1, close))) {

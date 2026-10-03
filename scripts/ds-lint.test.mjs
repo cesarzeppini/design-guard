@@ -516,3 +516,15 @@ test('scan: a missing components directory yields an empty list, not a crash', (
   assert.deepEqual(scan(root, ['src']), []);
   rmSync(root, { recursive: true, force: true });
 });
+
+test('scan: reads props from an inline annotation when there is no Props type', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui\n',
+    'src/components/ui/button.tsx':
+      '// @approved\nexport function Button({ variant = "primary", children }: { variant?: "primary" | "secondary"; children: React.ReactNode }) { return null; }\n',
+  });
+  const [button] = scan(root, ['src']);
+  assert.deepEqual(button.props.map((p) => p.name), ['variant', 'children']);
+  assert.deepEqual(button.variants.variant, ['primary', 'secondary']);
+  rmSync(root, { recursive: true, force: true });
+});
