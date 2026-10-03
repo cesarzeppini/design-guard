@@ -710,3 +710,47 @@ test('--added-markers sees a marker added by --approve', () => {
   assert.match(out, /button\.tsx/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- scan-core (what the /components page runs in the browser) ----
+
+import { scanProject, summarize } from './scan-core.mjs';
+
+const CORE_FILES = {
+  'src/components/ui/button.tsx': '// @approved\nexport const Button = () => null;\n',
+  'src/components/ui/popover.tsx': 'export const Popover = () => null;\n',
+  'src/components/ui/orphan.tsx': 'export const Orphan = () => null;\n',
+  'src/pages/a.tsx': 'import { Button } from "@/components/ui/button";\nimport { Popover } from "@/components/ui/popover";\nconst x = <button>raw</button>;\n',
+  'src/pages/b.tsx': 'import { Button } from "@/components/ui/button";\nconst y = <input />;\n',
+  'src/design-guard/Components.tsx': 'const z = <button>page itself</button>;\n',
+};
+
+test('core: scanProject works on an in-memory file map, no filesystem', () => {
+  const out = scanProject({ files: CORE_FILES, componentDirs: ['src/components/ui'] });
+  const by = Object.fromEntries(out.map((c) => [c.name, c.status]));
+  assert.deepEqual(by, { Button: 'approved', Orphan: 'unmarked-unused', Popover: 'unmarked-in-use' });
+});
+
+test('core: summarize reports adoption and raw elements, excluding the page itself', () => {
+  const components = scanProject({ files: CORE_FILES, componentDirs: ['src/components/ui'] });
+  const s = summarize(components, { files: CORE_FILES, componentDirs: ['src/components/ui'], exclude: ['src/design-guard'] });
+  assert.equal(s.total, 3);
+  assert.equal(s.approved, 1);
+  assert.equal(s.decisionsWaiting, 1);
+  assert.equal(s.unused, 1);
+  assert.equal(s.approvedUsage, 2);
+  assert.equal(s.totalUsage, 3);
+  assert.equal(s.adoption, 67);
+  assert.equal(s.rawElements, 2);
+  assert.equal(s.rawElementFiles, 2);
+});
+
+test('core: adoption is null, not NaN, when nothing is in use', () => {
+  const files = { 'src/components/ui/a.tsx': 'export const A = () => null;\n' };
+  const comps = scanProject({ files, componentDirs: ['src/components/ui'] });
+  assert.equal(summarize(comps, { files, componentDirs: ['src/components/ui'] }).adoption, null);
+});
+
+test('core: bundler-style paths work once the leading slash is stripped by the caller', () => {
+  const out = scanProject({ files: { 'src/components/ui/x.tsx': '// @approved\nexport const X = 1;\n' }, componentDirs: ['./src/components/ui/'] });
+  assert.equal(out[0].approved, true);
+});
