@@ -7,6 +7,7 @@
 //   ds-lint.mjs --registry [root]            inventory for the report's registry section
 //   ds-lint.mjs --approve <file...>          add the @approved marker (a human's act — see SKILL.md)
 //   ds-lint.mjs --unapprove <file...>        remove it
+//   ds-lint.mjs --serve [--port N]           local API for the /components page's approve/revoke buttons
 //   ds-lint.mjs --scan [root]                every component as JSON: status, usage, props, variants
 //
 // Exit 1 when any hit is found, 0 when clean. --registry always exits 0 (inventory,
@@ -20,6 +21,8 @@
 import { readFileSync, readdirSync, statSync, writeFileSync, realpathSync } from 'node:fs';
 import { join, basename, resolve, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   MARKER_WINDOW,
   MARKER_RE,
@@ -362,6 +365,115 @@ function approveMode(approved, files) {
     }
   }
   return code;
+}
+
+// ---- mode: --serve ----
+// A tiny local API so the /components page can approve and revoke with one click.
+// The page is a browser page and cannot write files; this is the process with file
+// access behind it. It only ever calls setApproval(), so everything that function
+// refuses (paths outside the component dirs, symlinks, non-component files) is refused
+// here too.
+//
+// Threat model, stated plainly: it listens on 127.0.0.1 only, checks Host and Origin
+// (so a web page on another site cannot reach it, including by DNS rebinding), and
+// needs a random token for every write. Anything running as you on this machine —
+// including an AI agent with shell access — can read the token from this terminal, so
+// this stops other websites and stray requests, not a determined local process.
+// --added-markers is the backstop for that.
+
+const LOCAL_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+const MAX_BODY = 16 * 1024;
+
+function serveMode(args) {
+  const pi = args.indexOf('--port');
+  const port = pi >= 0 ? Number(args[pi + 1]) : 4177;
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    console.error('ds-lint: --port needs a number between 0 and 65535');
+    return 2;
+  }
+  const token = randomBytes(24).toString('hex');
+  const tokenBuf = Buffer.from(token);
+  const root = process.cwd();
+
+  const server = createServer((req, res) => {
+    const send = (status, body, extra = {}) => {
+      res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...extra });
+      res.end(JSON.stringify(body));
+    };
+
+    const { port: bound } = server.address();
+    const host = req.headers.host || '';
+    if (host !== `127.0.0.1:${bound}` && host !== `localhost:${bound}`) return send(403, { error: 'bad host' });
+
+    const origin = req.headers.origin;
+    if (origin !== undefined && !LOCAL_ORIGIN_RE.test(origin)) return send(403, { error: 'origin not allowed' });
+    const cors = origin
+      ? {
+          'Access-Control-Allow-Origin': origin,
+          Vary: 'Origin',
+          'Access-Control-Allow-Headers': 'Content-Type, X-Guard-Token',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Private-Network': 'true',
+        }
+      : {};
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, cors);
+      return res.end();
+    }
+    if (req.method === 'GET' && req.url === '/ping') return send(200, { ok: true, tool: 'design-guard' }, cors);
+
+    if (req.method === 'POST' && (req.url === '/approve' || req.url === '/unapprove')) {
+      const given = Buffer.from(String(req.headers['x-guard-token'] || ''));
+      if (given.length !== tokenBuf.length || !timingSafeEqual(given, tokenBuf)) {
+        return send(401, { error: 'missing or wrong token' }, cors);
+      }
+      if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
+        return send(415, { error: 'send application/json' }, cors);
+      }
+      let body = '';
+      let tooBig = false;
+      req.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > MAX_BODY) {
+          tooBig = true;
+          req.destroy();
+        }
+      });
+      req.on('end', () => {
+        if (tooBig) return;
+        let file;
+        try {
+          file = JSON.parse(body).file;
+        } catch {
+          return send(400, { error: 'invalid JSON' }, cors);
+        }
+        if (typeof file !== 'string' || !file) return send(400, { error: 'file is required' }, cors);
+        try {
+          const r = setApproval(file, req.url === '/approve', root);
+          console.log(`${new Date().toLocaleTimeString()}  ${r.message}`);
+          return send(200, r, cors);
+        } catch (e) {
+          if (!(e instanceof MarkerError)) throw e;
+          return send(400, { error: e.message }, cors);
+        }
+      });
+      return;
+    }
+    return send(404, { error: 'not found' }, cors);
+  });
+
+  server.listen(port, '127.0.0.1', () => {
+    const { port: bound } = server.address();
+    console.log(`design-guard listening on http://127.0.0.1:${bound}  (this machine only)`);
+    console.log('');
+    console.log(`Token: ${token}`);
+    console.log('');
+    console.log('Paste the token into the /components page to enable one-click approve and revoke.');
+    console.log('Only a human should do that. Ctrl+C stops it.');
+  });
+  process.on('SIGINT', () => process.exit(0));
+  return null; // keep running
 }
 
 // ---- mode: lint ----
@@ -709,6 +821,9 @@ if (argv[0] === '--added-markers') {
   process.exit(addedMarkers(argv[1] || 'main...HEAD'));
 } else if (argv[0] === '--approve' || argv[0] === '--unapprove') {
   process.exit(approveMode(argv[0] === '--approve', argv.slice(1)));
+} else if (argv[0] === '--serve') {
+  const code = serveMode(argv.slice(1));
+  if (code !== null) process.exit(code);
 } else if (argv[0] === '--scan') {
   process.exit(scanMode(argv[1] || '.'));
 } else if (argv[0] === '--registry') {

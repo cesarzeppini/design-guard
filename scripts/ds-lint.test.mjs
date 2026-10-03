@@ -754,3 +754,136 @@ test('core: bundler-style paths work once the leading slash is stripped by the c
   const out = scanProject({ files: { 'src/components/ui/x.tsx': '// @approved\nexport const X = 1;\n' }, componentDirs: ['./src/components/ui/'] });
   assert.equal(out[0].approved, true);
 });
+
+// ---- --serve ----
+// The server is the one place a web page can cause a file write, so most of these
+// are attempts that must be refused — and the file must be unchanged afterwards.
+
+import { spawn } from 'node:child_process';
+import { request } from 'node:http';
+
+function startServer(root) {
+  return new Promise((resolveStart, reject) => {
+    const child = spawn('node', [SCRIPT, '--serve', '--port', '0'], { cwd: root });
+    let out = '';
+    child.stdout.on('data', (d) => {
+      out += d;
+      const port = out.match(/127\.0\.0\.1:(\d+)/)?.[1];
+      const token = out.match(/Token: (\w+)/)?.[1];
+      if (port && token) resolveStart({ child, port: Number(port), token });
+    });
+    child.on('error', reject);
+    setTimeout(() => reject(new Error('server did not start: ' + out)), 5000);
+  });
+}
+
+function call({ port, method = 'POST', path = '/approve', headers = {}, body, host }) {
+  return new Promise((resolveCall, reject) => {
+    const data = body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body);
+    const req = request(
+      { host: '127.0.0.1', port, method, path, headers: { Host: host ?? `127.0.0.1:${port}`, ...headers } },
+      (res) => {
+        let text = '';
+        res.on('data', (d) => (text += d));
+        res.on('end', () => resolveCall({ status: res.statusCode, headers: res.headers, json: text ? JSON.parse(text) : null }));
+      },
+    );
+    req.on('error', reject);
+    if (data !== undefined) req.write(data);
+    req.end();
+  });
+}
+
+const JSON_HDR = { 'Content-Type': 'application/json' };
+
+test('serve: ping works without a token and approve writes the marker with one', async () => {
+  const root = project({ ...MK, [BTN]: 'export const Button = () => null;\n' });
+  const srv = await startServer(root);
+  try {
+    assert.equal((await call({ port: srv.port, method: 'GET', path: '/ping' })).status, 200);
+    const r = await call({ port: srv.port, headers: { ...JSON_HDR, 'X-Guard-Token': srv.token }, body: { file: BTN } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.changed, true);
+    assert.equal(read(root, BTN), '// @approved\nexport const Button = () => null;\n');
+    const u = await call({ port: srv.port, path: '/unapprove', headers: { ...JSON_HDR, 'X-Guard-Token': srv.token }, body: { file: BTN } });
+    assert.equal(u.status, 200);
+    assert.equal(read(root, BTN), 'export const Button = () => null;\n');
+  } finally {
+    srv.child.kill();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('serve: refuses a missing or wrong token and leaves the file alone', async () => {
+  const root = project({ ...MK, [BTN]: 'export const Button = () => null;\n' });
+  const srv = await startServer(root);
+  try {
+    for (const headers of [{ ...JSON_HDR }, { ...JSON_HDR, 'X-Guard-Token': 'x'.repeat(48) }, { ...JSON_HDR, 'X-Guard-Token': 'short' }]) {
+      const r = await call({ port: srv.port, headers, body: { file: BTN } });
+      assert.equal(r.status, 401);
+    }
+    assert.equal(read(root, BTN), 'export const Button = () => null;\n');
+  } finally {
+    srv.child.kill();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('serve: refuses a foreign Host (DNS rebinding) and a foreign Origin, even with the token', async () => {
+  const root = project({ ...MK, [BTN]: 'export const Button = () => null;\n' });
+  const srv = await startServer(root);
+  try {
+    const authed = { ...JSON_HDR, 'X-Guard-Token': srv.token };
+    assert.equal((await call({ port: srv.port, headers: authed, body: { file: BTN }, host: 'evil.example' })).status, 403);
+    assert.equal((await call({ port: srv.port, headers: { ...authed, Origin: 'https://evil.example' }, body: { file: BTN } })).status, 403);
+    assert.equal((await call({ port: srv.port, headers: { ...authed, Origin: 'http://localhost.evil.example' }, body: { file: BTN } })).status, 403);
+    assert.equal(read(root, BTN), 'export const Button = () => null;\n');
+  } finally {
+    srv.child.kill();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('serve: CORS is granted to localhost pages only, including the preflight', async () => {
+  const root = project({ ...MK, [BTN]: 'export {};\n' });
+  const srv = await startServer(root);
+  try {
+    const ok = await call({ port: srv.port, method: 'OPTIONS', headers: { Origin: 'http://localhost:5173' } });
+    assert.equal(ok.status, 204);
+    assert.equal(ok.headers['access-control-allow-origin'], 'http://localhost:5173');
+    assert.match(ok.headers['access-control-allow-headers'], /X-Guard-Token/);
+    const bad = await call({ port: srv.port, method: 'OPTIONS', headers: { Origin: 'https://evil.example' } });
+    assert.equal(bad.status, 403);
+    assert.equal(bad.headers['access-control-allow-origin'], undefined);
+  } finally {
+    srv.child.kill();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('serve: refuses paths outside the component dirs, bad bodies, wrong content type, unknown routes', async () => {
+  const root = project({ ...MK, [BTN]: 'export {};\n', 'secrets.ts': 'export {};\n' });
+  const srv = await startServer(root);
+  try {
+    const h = { ...JSON_HDR, 'X-Guard-Token': srv.token };
+    assert.equal((await call({ port: srv.port, headers: h, body: { file: 'secrets.ts' } })).status, 400);
+    assert.equal((await call({ port: srv.port, headers: h, body: { file: '../../etc/passwd' } })).status, 400);
+    assert.equal((await call({ port: srv.port, headers: h, body: {} })).status, 400);
+    assert.equal((await call({ port: srv.port, headers: h, body: 'not json' })).status, 400);
+    assert.equal((await call({ port: srv.port, headers: { 'Content-Type': 'text/plain', 'X-Guard-Token': srv.token }, body: '{"file":"x"}' })).status, 415);
+    assert.equal((await call({ port: srv.port, method: 'GET', path: '/approve' })).status, 404);
+    assert.equal((await call({ port: srv.port, method: 'GET', path: '/nope' })).status, 404);
+    assert.equal(read(root, 'secrets.ts'), 'export {};\n');
+  } finally {
+    srv.child.kill();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('serve: a bad --port is an error, not a crash', () => {
+  const root = project({ ...MK });
+  const { code, out } = run(root, ['--serve', '--port', 'abc']);
+  assert.equal(code, 2);
+  assert.match(out, /--port needs a number/);
+  rmSync(root, { recursive: true, force: true });
+});

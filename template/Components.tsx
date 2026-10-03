@@ -4,12 +4,13 @@
 // the same scan the CLI runs, so what you see here is what the linter sees. Nothing to
 // regenerate. This file is deliberately plain React + inline CSS: it must work in any
 // Vite project and does not follow your design system, so keep it out of the lint path.
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { scanProject, summarize, type ComponentInfo, type ComponentStatus } from './scan-core.mjs';
 
 // ---- configure ----
 const COMPONENT_DIRS = ['src/components/ui']; // same as `components:` in design-guard.config
 const EXCLUDE = ['src/design-guard']; // this page's own folder, left out of the stats
+const GUARD_URL = 'http://127.0.0.1:4177'; // `node scripts/ds-lint.mjs --serve` — optional, enables one-click
 // -------------------
 
 const raw = import.meta.glob('/src/**/*.{ts,tsx,jsx}', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
@@ -33,6 +34,50 @@ export default function Components() {
   const components = useMemo(() => scanProject({ files, componentDirs: COMPONENT_DIRS }), []);
   const stats = useMemo(() => summarize(components, { files, componentDirs: COMPONENT_DIRS, exclude: EXCLUDE }), [components]);
   const [copied, setCopied] = useState<string | null>(null);
+
+  // Optional live mode: if `ds-lint --serve` is running, buttons edit the file directly.
+  // Otherwise they copy a prompt. The token is typed in by the human, once per tab.
+  const [live, setLive] = useState(false);
+  const [token, setToken] = useState(() => {
+    try { return sessionStorage.getItem('dg-token') || ''; } catch { return ''; }
+  });
+  const [draft, setDraft] = useState('');
+  const [note, setNote] = useState<{ key: string; text: string; bad?: boolean } | null>(null);
+
+  useEffect(() => {
+    let stop = false;
+    const ping = () =>
+      fetch(`${GUARD_URL}/ping`).then((r) => r.ok).catch(() => false).then((ok) => { if (!stop) setLive(ok); });
+    ping();
+    const t = setInterval(ping, 5000);
+    return () => { stop = true; clearInterval(t); };
+  }, []);
+
+  const saveToken = (t: string) => {
+    setToken(t);
+    try { sessionStorage.setItem('dg-token', t); } catch { /* storage unavailable: token lasts until reload */ }
+  };
+
+  const act = async (c: ComponentInfo) => {
+    const route = c.approved ? 'unapprove' : 'approve';
+    try {
+      const r = await fetch(`${GUARD_URL}/${route}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Guard-Token': token },
+        body: JSON.stringify({ file: c.file }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 401) { saveToken(''); setNote({ key: c.key, text: 'Token rejected — paste the current one.', bad: true }); return; }
+      if (!r.ok) { setNote({ key: c.key, text: j.error || `Failed (${r.status})`, bad: true }); return; }
+      setNote({ key: c.key, text: c.approved ? 'Approval revoked ✓' : 'Approved ✓' });
+      setTimeout(() => setNote((cur) => (cur?.key === c.key ? null : cur)), 2500);
+    } catch {
+      setLive(false);
+      setNote({ key: c.key, text: 'Local guard stopped — falling back to prompts.', bad: true });
+    }
+  };
+
+  const direct = live && !!token;
 
   const copy = async (id: string, text: string) => {
     try {
@@ -89,14 +134,17 @@ export default function Components() {
         <div className="dg-actions">
           <button
             className={c.approved ? 'dg-btn' : 'dg-btn dg-primary'}
-            onClick={() => copy(c.key, c.approved ? revokePrompt(c) : approvePrompt(c))}
-            title="Copies a prompt — paste it to your AI assistant"
+            onClick={() => (direct ? act(c) : copy(c.key, c.approved ? revokePrompt(c) : approvePrompt(c)))}
+            title={direct ? 'Edits the file now' : 'Copies a prompt — paste it to your AI assistant'}
           >
             {copied === c.key ? 'Prompt copied ✓' : c.approved ? 'Revoke approval' : 'Approve'}
           </button>
-          <button className="dg-link" onClick={() => copy(c.key + ':cmd', command(c))} title={command(c)}>
-            {copied === c.key + ':cmd' ? 'Command copied ✓' : 'Copy command'}
-          </button>
+          {note?.key === c.key && <span className={note.bad ? 'dg-note dg-bad' : 'dg-note'}>{note.text}</span>}
+          {!direct && (
+            <button className="dg-link" onClick={() => copy(c.key + ':cmd', command(c))} title={command(c)}>
+              {copied === c.key + ':cmd' ? 'Command copied ✓' : 'Copy command'}
+            </button>
+          )}
         </div>
       </li>
     );
@@ -124,6 +172,15 @@ export default function Components() {
           your AI assistant — only a human decides what is approved.
         </p>
       </header>
+
+      {live && !token && (
+        <form className="dg-banner" onSubmit={(e) => { e.preventDefault(); if (draft.trim()) { saveToken(draft.trim()); setDraft(''); } }}>
+          <span>Local guard detected. Paste the token from its terminal to enable one-click approval — a human's decision, so it is not filled in for you.</span>
+          <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="token" autoComplete="off" spellCheck={false} />
+          <button className="dg-btn dg-primary" type="submit">Connect</button>
+        </form>
+      )}
+      {live && token && <p className="dg-live">● Live — approvals edit your files directly.</p>}
 
       <div className="dg-stats">
         {stat(stats.approved, 'approved')}
@@ -175,6 +232,8 @@ body:has(.dg){background:#fff}@media (prefers-color-scheme:dark){body:has(.dg){b
 .dg-actions{display:grid;gap:4px;justify-items:end;flex:none}
 .dg-btn{font:inherit;font-weight:600;padding:7px 12px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--fg);cursor:pointer}
 .dg-btn.dg-primary{background:var(--pri);color:var(--prifg);border-color:var(--pri)}
+.dg-banner{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--warnbg);color:var(--warn);border-radius:12px;padding:12px 14px;margin-top:18px}.dg-banner input{font:12px ui-monospace,Menlo,monospace;padding:7px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);min-width:260px;flex:1}
+.dg-live{color:var(--ok);font-size:12px;margin:14px 0 0}.dg-note{font-size:12px;color:var(--ok)}.dg-note.dg-bad{color:var(--warn)}
 .dg-link{font:inherit;font-size:12px;background:none;border:0;color:var(--mut);cursor:pointer;text-decoration:underline}
 @media (max-width:640px){.dg-row{flex-direction:column}.dg-actions{justify-items:start}}
 `;
