@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: cesarzeppini/design-guard@main
+      - uses: cesarzeppini/design-guard@v0.1.0
         with:
           path: src
 ```

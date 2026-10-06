@@ -494,7 +494,7 @@ const PATTERNS = [
 // Semantic elements the CSS base layer already styles. Typography utilities on
 // these silently defeat the type scale — the most common drift in a Tailwind
 // codebase, and one of the few design mistakes a machine can actually see.
-// Gated on `typography-base:` in design-guard.config: on a project whose base layer styles
+// Gated on `typography-base:` in design-guard.config (or context/STACK.md): on a project whose base layer styles
 // nothing, the utilities ARE the styling and this would fire on every heading.
 const TYPOGRAPHIC_ELEMENTS = 'h1|h2|h3|h4|h5|h6|p|a|strong|blockquote|li|label|legend';
 const SEMANTIC_TAG_RE = new RegExp(`<(${TYPOGRAPHIC_ELEMENTS})\\s[^>]*className="([^"]*)"`, 'g');
@@ -737,12 +737,12 @@ function lint(targets) {
       console.log('');
       console.log('   Typography utilities on headings, paragraphs and links are going');
       console.log('   unchecked against a base layer that already sets them. Set');
-      console.log('   `typography-base: true` in design-guard.config to check them.');
+      console.log('   `typography-base: true` in design-guard.config (or context/STACK.md) to check them.');
       console.log('');
       hits = 1;
     } else {
       console.log('== typography check off — no base layer found styling semantic elements');
-      console.log('   Record it: `typography-base: false` in design-guard.config. This line');
+      console.log('   Record it: `typography-base: false` in design-guard.config (or context/STACK.md). This line');
       console.log('   stops once the decision is written down.');
       console.log('');
     }
@@ -766,7 +766,7 @@ function lint(targets) {
     unlisted.forEach((d) => console.log(`  ${d}`));
     console.log('');
     console.log('   These are never examined, so their components are neither approved nor');
-    console.log('   flagged. Add each to components: in design-guard.config, or record it under');
+    console.log('   flagged. Add each to components: in design-guard.config (or context/STACK.md), or record it under');
     console.log('   components-ignore: to say the exclusion is deliberate.');
     console.log('');
     hits = 1;
@@ -775,7 +775,7 @@ function lint(targets) {
   const existing = COMPONENT_DIRS.filter(isDir);
   if (existing.length === 0) {
     console.log(
-      '== component directory not found (set components: in design-guard.config) — approval cannot be verified'
+      '== component directory not found (set components: in design-guard.config (or context/STACK.md)) — approval cannot be verified'
     );
     console.log(`   looked for: ${COMPONENT_DIRS.join(' ')}`);
     console.log('');
