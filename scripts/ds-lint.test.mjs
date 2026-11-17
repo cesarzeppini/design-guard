@@ -887,3 +887,106 @@ test('serve: a bad --port is an error, not a crash', () => {
   assert.match(out, /--port needs a number/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- --added-markers: config edits that narrow the check ----
+// The config is a second way to make a component stop being flagged: ignore its
+// directory, or drop it from components:. Nothing reported that, so an agent could
+// silence the guard without touching a marker.
+
+function gitRepo(files) {
+  const root = project(files);
+  const git = (...args) =>
+    execFileSync('git', args, {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' },
+    });
+  git('init', '-q', '-b', 'main');
+  git('add', '-A');
+  git('commit', '-qm', 'base');
+  git('checkout', '-qb', 'feat');
+  const commit = (path, body) => {
+    writeFileSync(join(root, path), body);
+    git('add', '-A');
+    git('commit', '-qm', `edit ${path}`);
+  };
+  return { root, commit };
+}
+
+const CONFIG_BASE = 'components: src/components/ui, src/components/app\ntypography-base: true\n';
+
+test('--added-markers reports a directory added to components-ignore', () => {
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE });
+  commit('design-guard.config', CONFIG_BASE + 'components-ignore: src/components/shared\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /config changes that narrow the check/);
+  assert.match(out, /components-ignore: added src\/components\/shared/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports a directory removed from components', () => {
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE });
+  commit('design-guard.config', 'components: src/components/ui\ntypography-base: true\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /components: removed src\/components\/app/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports typography-base switched off, including by deleting the key', () => {
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE });
+  commit('design-guard.config', 'components: src/components/ui, src/components/app\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /typography-base: true -> off/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers sees a narrowing edit in context/STACK.md too', () => {
+  const { root, commit } = gitRepo({ 'context/STACK.md': '# Stack\ncomponents: src/components/ui\n' });
+  commit('context/STACK.md', '# Stack\ncomponents: src/components/ui\ncomponents-ignore: src/components/legacy\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /components-ignore: added src\/components\/legacy/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers stays quiet on config edits that widen the check', () => {
+  const { root, commit } = gitRepo({
+    'design-guard.config': 'components: src/components/ui\ncomponents-ignore: src/components/legacy\ntypography-base: false\n',
+  });
+  // add a directory, stop ignoring one, turn typography on, reorder — all stricter or neutral
+  commit('design-guard.config', 'typography-base: true\ncomponents: src/components/app, src/components/ui   # now two\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 0, out);
+  assert.match(out, /No config changes narrowing the check/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers treats deleting the config as narrowing when it listed more than the default', () => {
+  const { root } = gitRepo({ 'design-guard.config': CONFIG_BASE });
+  rmSync(join(root, 'design-guard.config'));
+  // single-rev range: compares against the working tree, like `git diff main`
+  const { code, out } = run(root, ['--added-markers', 'main']);
+  assert.equal(code, 1);
+  assert.match(out, /components: removed src\/components\/app/);
+  assert.match(out, /typography-base: true -> off/);
+  assert.doesNotMatch(out, /removed src\/components\/ui\b/); // the default still covers it
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports markers and config edits together', () => {
+  const { root, commit } = gitRepo({
+    'design-guard.config': CONFIG_BASE,
+    'src/components/ui/card.tsx': 'export const Card = () => null;\n',
+  });
+  commit('src/components/ui/card.tsx', '// @approved\nexport const Card = () => null;\n');
+  commit('design-guard.config', CONFIG_BASE + 'components-ignore: src/components/shared\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /markers added in main\.\.\.HEAD/);
+  assert.match(out, /card\.tsx/);
+  assert.match(out, /components-ignore: added src\/components\/shared/);
+  rmSync(root, { recursive: true, force: true });
+});

@@ -40,6 +40,8 @@ No registry page to maintain, no list to keep in sync. The approved set is whate
 
 **An agent never adds the marker on its own.** If it could, it would approve whatever it just invented and the guard would become a mirror. Every marker added in a diff is reported, and `ds-lint --added-markers main...HEAD` detects them mechanically instead of trusting anyone to self-report.
 
+The config gets the same treatment. Ignoring a directory in `design-guard.config` silences it just as surely as approving everything in it, so `--added-markers` also reports config edits that narrow the check: a directory added to `components-ignore`, one removed from `components`, or `typography-base` switched off.
+
 ## What it catches
 
 | # | Violation | Example |
@@ -135,14 +137,14 @@ node scripts/ds-lint.mjs --registry             # approved / in use / unused
 node scripts/ds-lint.mjs --scan                 # every component as JSON
 node scripts/ds-lint.mjs --approve <file...>    # add the @approved marker
 node scripts/ds-lint.mjs --unapprove <file...>  # remove it
-node scripts/ds-lint.mjs --added-markers main...HEAD
+node scripts/ds-lint.mjs --added-markers main...HEAD  # markers added + config edits that narrow the check
 ```
 
 `--approve` only writes inside your configured component directories and refuses anything else. An optional `--serve` mode exists for one-click buttons on the page, but it needs Node running next to your dev server and is not required.
 
 ## Exit codes
 
-`0` clean · `1` violations found. `--registry` always exits `0` (inventory, not a finding). `--added-markers <range>` exits `1` if any markers were added.
+`0` clean · `1` violations found. `--registry` always exits `0` (inventory, not a finding). `--added-markers <range>` exits `1` if any markers were added or the config was narrowed.
 
 ## Why Node, not shell
 

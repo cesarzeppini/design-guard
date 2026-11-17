@@ -55,6 +55,13 @@ node scripts/ds-lint.mjs --added-markers main...HEAD
 
 A marker in the diff that you never mentioned is itself the finding.
 
+### The config is approval too
+
+`design-guard.config` decides what the guard looks at, so editing it can do what a marker does: put `src/components/shared` under `components-ignore:` and everything in it stops being flagged, approved or not. The same rule applies:
+
+- **Edit the config only when the human asks for that edit in that moment.** Never to make a finding go away, never because a directory "isn't really design-system components", never while you're in the file for something else. If you think a directory should be listed or ignored, say so and let them decide.
+- **Every config change in the diff is reported**, including the ones the human asked for. `--added-markers` lists the ones that narrow the check (a directory added to `components-ignore:`, one dropped from `components:`, `typography-base` switched off) alongside the markers, and exits 1 for either. A narrowing change you never mentioned is itself the finding.
+
 ## Config — optional, sensible defaults if you skip it
 
 `ds-lint.mjs` reads three optional keys, one per line, from `design-guard.config` in the project root (it falls back to `context/STACK.md` if that's where the project keeps its facts). A missing file just means defaults:

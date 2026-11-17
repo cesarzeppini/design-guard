@@ -3,7 +3,7 @@
 //
 // Usage:
 //   ds-lint.mjs <file-or-dir> [...]          lint (defaults to src/)
-//   ds-lint.mjs --added-markers <git-range>  audit @approved markers added in a range
+//   ds-lint.mjs --added-markers <git-range>  audit @approved markers and config edits that narrow the check
 //   ds-lint.mjs --registry [root]            inventory for the report's registry section
 //   ds-lint.mjs --approve <file...>          add the @approved marker (a human's act — see SKILL.md)
 //   ds-lint.mjs --unapprove <file...>        remove it
@@ -11,7 +11,7 @@
 //   ds-lint.mjs --scan [root]                every component as JSON: status, usage, props, variants
 //
 // Exit 1 when any hit is found, 0 when clean. --registry always exits 0 (inventory,
-// not a finding). --added-markers exits 1 when markers were added.
+// not a finding). --added-markers exits 1 when markers were added or the config narrowed.
 //
 // Node rather than shell, deliberately. The shell version accumulated four bugs of
 // kinds this file cannot have: `ls a b` failing when only one glob missed, a sed
@@ -48,17 +48,28 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'co
 
 const CONFIG_FILES = ['design-guard.config', 'context/STACK.md'];
 
-function stackKey(name) {
+// The same lookup over any source of file text, so --added-markers can read the
+// config as it was at a past revision. `read(file)` returns the text or null.
+function configKey(name, read) {
   for (const file of CONFIG_FILES) {
-    try {
-      const text = readFileSync(file, 'utf8');
-      const m = text.match(new RegExp(`^${name}:[ \\t]*(.*)$`, 'm'));
-      if (m) return m[1].replace(/\s+#.*$/, '').trim();
-    } catch {
-      // file absent — try the next
-    }
+    const text = read(file);
+    if (text == null) continue; // file absent — try the next
+    const m = text.match(new RegExp(`^${name}:[ \\t]*(.*)$`, 'm'));
+    if (m) return m[1].replace(/\s+#.*$/, '').trim();
   }
   return '';
+}
+
+function readWorkingFile(file) {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function stackKey(name) {
+  return configKey(name, readWorkingFile);
 }
 
 function dirList(raw, fallback = '') {
@@ -179,16 +190,102 @@ function addedMarkers(range) {
     }
   }
 
+  const weakened = weakeningConfigChanges(range);
+  if (weakened === null) {
+    console.error(`ds-lint: cannot read the config at the start of "${range}"`);
+    return 2;
+  }
+
   if (found.size > 0) {
     console.log(`== @approved markers added in ${range}`);
     for (const f of [...found].sort()) console.log(`  ${f}`);
     console.log('');
     console.log('   Report each of these in the final report as a Needs-you item, naming who');
     console.log('   asked for it — including when a human did ask.');
-    return 1;
+  } else {
+    console.log(`No @approved markers added in ${range}`);
   }
-  console.log(`No @approved markers added in ${range}`);
-  return 0;
+
+  if (weakened.length > 0) {
+    if (found.size > 0) console.log('');
+    console.log(`== config changes that narrow the check in ${range}`);
+    for (const w of weakened) console.log(`  ${w}`);
+    console.log('');
+    console.log('   Each of these stops the guard looking at something. Like a marker, it is');
+    console.log("   a human's decision: report it as a Needs-you item, naming who asked for it.");
+  } else {
+    console.log(`No config changes narrowing the check in ${range}`);
+  }
+
+  return found.size > 0 || weakened.length > 0 ? 1 : 0;
+}
+
+// Resolve a diff range to the two states it compares, the way `git diff` does:
+// A...B  -> merge-base(A, B) vs B     A..B -> A vs B
+// A      -> A vs the working tree     (B defaults to HEAD)
+// Returns { base, head } where head === null means the working tree.
+function rangeEnds(range) {
+  const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  if (range.includes('...')) {
+    const [a, b] = range.split('...');
+    const head = b || 'HEAD';
+    return { base: git('merge-base', a || 'HEAD', head), head };
+  }
+  if (range.includes('..')) {
+    const [a, b] = range.split('..');
+    return { base: a || 'HEAD', head: b || 'HEAD' };
+  }
+  return { base: range, head: null };
+}
+
+function readAtRev(rev) {
+  return (file) => {
+    try {
+      // `./` makes the path relative to the current directory, so this works
+      // when the project is a subdirectory of the repository.
+      return execFileSync('git', ['show', `${rev}:./${file}`], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        maxBuffer: 16 * 1024 * 1024,
+      });
+    } catch {
+      return null; // file absent at that revision
+    }
+  };
+}
+
+function effectiveConfig(read) {
+  return {
+    components: dirList(configKey('components', read), 'src/components/ui'),
+    ignore: dirList(configKey('components-ignore', read)),
+    typographyBase: /^true$/i.test(configKey('typography-base', read)),
+  };
+}
+
+// Config edits that make the guard look at less: an ignored directory added, a
+// component directory dropped, or the type-scale check switched off. Edits that
+// widen the check are not reported. null if the range can't be resolved.
+function weakeningConfigChanges(range) {
+  let ends;
+  try {
+    ends = rangeEnds(range);
+  } catch {
+    return null;
+  }
+  const before = effectiveConfig(readAtRev(ends.base));
+  const after = effectiveConfig(ends.head === null ? readWorkingFile : readAtRev(ends.head));
+
+  const out = [];
+  for (const d of after.ignore) {
+    if (!before.ignore.includes(d)) out.push(`components-ignore: added ${d} — no longer scanned`);
+  }
+  for (const d of before.components) {
+    if (!after.components.includes(d)) out.push(`components: removed ${d} — no longer scanned`);
+  }
+  if (before.typographyBase && !after.typographyBase) {
+    out.push('typography-base: true -> off — typography check (violation 4) disabled');
+  }
+  return out;
 }
 
 // ---- component scan ----
