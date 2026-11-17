@@ -990,3 +990,64 @@ test('--added-markers reports markers and config edits together', () => {
   assert.match(out, /components-ignore: added src\/components\/shared/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- --added-markers: the exceptions file ----
+// allowed-customization.md used to tell the agent to add its own exceptions. Whatever
+// it lists stops being a finding, so a change to it is approval and gets reported.
+
+const EXCEPTIONS = '# Allowed customization\n\n## Never allowed, anywhere\n\n- `!important`\n';
+
+test('--added-markers reports an exception added to allowed-customization.md, wherever it is installed', () => {
+  const path = '.claude/skills/design-guard/allowed-customization.md';
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE, [path]: EXCEPTIONS });
+  commit(path, EXCEPTIONS + '\n## Exceptions\n\n- `ring-*` on Input\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /exceptions file changed/);
+  assert.match(out, /\.claude\/skills\/design-guard\/allowed-customization\.md  \(\+2 -0 lines\)/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports a rule removed from allowed-customization.md, even a Markdown line starting with --', () => {
+  const body = EXCEPTIONS + '-- spreading props\n';
+  const { root, commit } = gitRepo({ 'allowed-customization.md': body });
+  // removing "-- spreading props" shows in the diff as "--- spreading props", which
+  // looks like a file header; it must still count as a removed line
+  commit('allowed-customization.md', EXCEPTIONS);
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /allowed-customization\.md  \(\+0 -1 lines\)/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports deleting allowed-customization.md', () => {
+  const { root } = gitRepo({ 'allowed-customization.md': EXCEPTIONS });
+  rmSync(join(root, 'allowed-customization.md'));
+  const { code, out } = run(root, ['--added-markers', 'main']);
+  assert.equal(code, 1);
+  assert.match(out, /allowed-customization\.md  \(\+0 -3 lines\)/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers ignores other Markdown and whitespace-only edits to the exceptions file', () => {
+  const { root, commit } = gitRepo({ 'allowed-customization.md': EXCEPTIONS, 'docs/notes.md': 'x\n' });
+  commit('docs/notes.md', 'x\n- `ring-*` is fine\n');
+  commit('allowed-customization.md', EXCEPTIONS + '\n\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 0, out);
+  assert.doesNotMatch(out, /exceptions file changed/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports "unstyled by design" added to an existing marker line', () => {
+  const { root, commit } = gitRepo({
+    'design-guard.config': CONFIG_BASE,
+    'src/components/ui/card.tsx': '// @approved\nexport const Card = () => null;\n',
+  });
+  commit('src/components/ui/card.tsx', '// @approved — unstyled by design\nexport const Card = () => null;\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /markers added in main\.\.\.HEAD/);
+  assert.match(out, /card\.tsx/);
+  rmSync(root, { recursive: true, force: true });
+});

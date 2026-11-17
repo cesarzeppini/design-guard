@@ -61,6 +61,7 @@ A marker in the diff that you never mentioned is itself the finding.
 
 - **Edit the config only when the human asks for that edit in that moment.** Never to make a finding go away, never because a directory "isn't really design-system components", never while you're in the file for something else. If you think a directory should be listed or ignored, say so and let them decide.
 - **Every config change in the diff is reported**, including the ones the human asked for. `--added-markers` lists the ones that narrow the check (a directory added to `components-ignore:`, one dropped from `components:`, `typography-base` switched off) alongside the markers, and exits 1 for either. A narrowing change you never mentioned is itself the finding.
+- **`allowed-customization.md` is the same.** Whatever it allows stops being a finding, so only the human adds an exception there: park the case and propose the line, don't write it. `--added-markers` reports any change to that file, wherever it's installed.
 
 ## Config — optional, sensible defaults if you skip it
 

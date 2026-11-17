@@ -46,4 +46,11 @@ A component *designed* to be an unstyled layout or slot primitive may accept sur
 
 ## Adding a legitimate exception
 
-If a customization should be permanently allowed, add it to this file in the same task, so the next run does not re-flag it. An exception is either written down and reusable, or it gets flagged again — no verbal one-off approvals the next session can't see.
+An exception is either written down here and reusable, or it gets flagged again — no verbal one-off approvals the next session can't see.
+
+**Only a human adds one.** This file is approval in the same way an `@approved` marker is: whatever it lists stops being a finding, in every future run. An agent that could write here would allow whatever it just did, and the list would become a mirror.
+
+- When something you were about to flag looks like it should be permanently allowed, **park it and propose the exact line** to add here. Don't add it.
+- Add it only when the human asks for that exception in that moment ("allow `ring-*` on Input"). Write exactly what they asked for, nothing broader.
+- Never edit this file to make a finding go away, and never remove or soften a rule here unless asked.
+- Every change to this file is reported, including the ones the human asked for. `--added-markers` lists them alongside markers.

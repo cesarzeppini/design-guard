@@ -3,7 +3,8 @@
 //
 // Usage:
 //   ds-lint.mjs <file-or-dir> [...]          lint (defaults to src/)
-//   ds-lint.mjs --added-markers <git-range>  audit @approved markers and config edits that narrow the check
+//   ds-lint.mjs --added-markers <git-range>  audit @approved markers, config edits that narrow the check,
+//                                            and changes to allowed-customization.md
 //   ds-lint.mjs --registry [root]            inventory for the report's registry section
 //   ds-lint.mjs --approve <file...>          add the @approved marker (a human's act — see SKILL.md)
 //   ds-lint.mjs --unapprove <file...>        remove it
@@ -11,7 +12,8 @@
 //   ds-lint.mjs --scan [root]                every component as JSON: status, usage, props, variants
 //
 // Exit 1 when any hit is found, 0 when clean. --registry always exits 0 (inventory,
-// not a finding). --added-markers exits 1 when markers were added or the config narrowed.
+// not a finding). --added-markers exits 1 when markers were added, the config narrowed, or
+// allowed-customization.md changed.
 //
 // Node rather than shell, deliberately. The shell version accumulated four bugs of
 // kinds this file cannot have: `ls a b` failing when only one glob missed, a sed
@@ -47,6 +49,10 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'co
 // per line; anything else in the file is ignored, so STACK.md works unchanged.
 
 const CONFIG_FILES = ['design-guard.config', 'context/STACK.md'];
+
+// The skill's list of allowed customization. Wherever it is installed, a change
+// to it is a change to what counts as approved, so --added-markers reports it.
+const EXCEPTIONS_FILE = 'allowed-customization.md';
 
 // The same lookup over any source of file text, so --added-markers can read the
 // config as it was at a past revision. `read(file)` returns the text or null.
@@ -180,13 +186,32 @@ function addedMarkers(range) {
   }
 
   const found = new Set();
-  let file = null;
+  const exceptions = new Map(); // allowed-customization.md path -> { added, removed }
+  let file = null; // path on the new side; null when the file was deleted
+  let oldFile = null;
+  let inHeader = false; // ---/+++ are file headers only between `diff --git` and the first @@
   for (const line of diff.split('\n')) {
-    if (line.startsWith('+++ ')) {
+    if (line.startsWith('diff --git ')) {
+      inHeader = true;
+    } else if (line.startsWith('@@')) {
+      inHeader = false;
+    } else if (inHeader && line.startsWith('--- ')) {
+      const p = line.slice(4).trim();
+      oldFile = p === '/dev/null' ? null : p.replace(/^a\//, '');
+    } else if (inHeader && line.startsWith('+++ ')) {
       const p = line.slice(4).trim();
       file = p === '/dev/null' ? null : p.replace(/^b\//, '');
-    } else if (file && line.startsWith('+') && !line.startsWith('+++') && line.includes('@approved')) {
-      found.add(file);
+    } else if (!inHeader && (line.startsWith('+') || line.startsWith('-'))) {
+      const added = line.startsWith('+');
+      if (added && file && line.includes('@approved')) found.add(file);
+      // The exceptions file is policy: any line in or out changes what counts
+      // as allowed, so every change is reported, wording included.
+      const policy = file ?? oldFile;
+      if (policy && basename(policy) === EXCEPTIONS_FILE && line.slice(1).trim() !== '') {
+        const n = exceptions.get(policy) ?? { added: 0, removed: 0 };
+        n[added ? 'added' : 'removed'] += 1;
+        exceptions.set(policy, n);
+      }
     }
   }
 
@@ -217,7 +242,18 @@ function addedMarkers(range) {
     console.log(`No config changes narrowing the check in ${range}`);
   }
 
-  return found.size > 0 || weakened.length > 0 ? 1 : 0;
+  if (exceptions.size > 0) {
+    console.log('');
+    console.log(`== exceptions file changed in ${range}`);
+    for (const [f, n] of [...exceptions].sort()) {
+      console.log(`  ${f}  (+${n.added} -${n.removed} lines)`);
+    }
+    console.log('');
+    console.log('   This file says what customization is allowed. Only a human adds an');
+    console.log('   exception: report it as a Needs-you item, naming who asked for it.');
+  }
+
+  return found.size > 0 || weakened.length > 0 || exceptions.size > 0 ? 1 : 0;
 }
 
 // Resolve a diff range to the two states it compares, the way `git diff` does:
