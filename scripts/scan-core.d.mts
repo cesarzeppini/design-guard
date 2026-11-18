@@ -27,6 +27,7 @@ export interface Summary {
   rawElementFiles: number;
 }
 
+export function resolveImportKey(fromFile: string, spec: string, componentDirs: string[]): string | null;
 export function scanProject(opts: { files: Record<string, string>; componentDirs: string[] }): ComponentInfo[];
 export function summarize(
   components: ComponentInfo[],

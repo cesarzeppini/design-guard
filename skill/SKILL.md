@@ -24,7 +24,7 @@ Any comment syntax the file uses is fine (`//`, `/* */`, `{/* */}`, `#`).
 
 Build the approved list at check time by scanning the directories in `components:` (see Config), which **may list several** — hand-built components and generated plumbing usually live apart, and every listed directory is checked. Defaults to `src/components/ui` when the key is absent. Never hardcode a list.
 
-Imports are matched by directory tail rather than by a fixed alias, so `@/components/ui/x`, `~/components/ui/x` and `../../components/ui/x` all resolve to the same component. A project that uses no alias at all works the same way.
+Imports are matched by directory tail rather than by a fixed alias, so `@/components/ui/x`, `~/components/ui/x` and `../../components/ui/x` all resolve to the same component. Relative imports are also resolved against the importing file, so `../ui/x` from a sibling folder counts too. A project that uses no alias at all works the same way.
 
 ### How to approve and revoke (when the human asks)
 

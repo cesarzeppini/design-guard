@@ -1346,3 +1346,123 @@ test('scan: an indexed or non-union variant type declares no values', () => {
   assert.deepEqual(by.Pill.variants.size, ['sm', 'lg']);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- className built in code ----
+// The override and typography checks only read className="…". In a shadcn codebase
+// most classes go through cn(), template literals or constants, and passed unseen.
+
+const BUILT = {
+  'design-guard.config': 'components: src/components/ui\ntypography-base: true\n',
+  'src/components/ui/card.tsx': '// @approved\nexport const Card = (p: any) => null;\n',
+};
+
+const linesFor = (out, file) => out.split('\n').filter((l) => l.startsWith(file));
+
+test('appearance overrides are found in cn(), template literals, ternaries and same-file constants', () => {
+  const root = project({
+    ...BUILT,
+    'src/routes/page.tsx': [
+      'import { Card } from "@/components/ui/card";',
+      'import { cn } from "@/lib/utils";',
+      'const surface = "rounded-xl";',
+      'export const P = ({ active, x, className }: any) => (<>',
+      '  <Card className={cn("mt-4 flex", active && "bg-primary", className)} />',
+      '  <Card className={`shadow-lg ${x}`} />',
+      '  <Card className={active ? "p-4" : "border-dashed"} />',
+      '  <Card className={surface} />',
+      '  <Card className={clsx({ "opacity-50": !active, "w-full": true })} />',
+      '  <Card',
+      '    className={cn(',
+      '      "gap-2",',
+      '      x && `ring-2 ${active ? "ring-offset-2" : ""}`,',
+      '    )}',
+      '  />',
+      '</>);',
+    ].join('\n'),
+  });
+  const { code, out } = run(root, ['src/routes']);
+  assert.equal(code, 1);
+  assert.deepEqual(linesFor(out, 'src/routes/page.tsx'), [
+    'src/routes/page.tsx:5: <Card> bg-primary (background)',
+    'src/routes/page.tsx:6: <Card> shadow-lg (shadow)',
+    'src/routes/page.tsx:7: <Card> border-dashed (border)',
+    'src/routes/page.tsx:8: <Card> rounded-xl (radius)',
+    'src/routes/page.tsx:9: <Card> opacity-50 (opacity)',
+    'src/routes/page.tsx:10: <Card> ring-offset-2 (ring)',
+    'src/routes/page.tsx:10: <Card> ring-2 (ring)',
+  ]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('built classNames: layout stays legal and unresolvable values stay silent', () => {
+  const root = project({
+    ...BUILT,
+    'src/routes/page.tsx': [
+      'import { Card } from "@/components/ui/card";',
+      'import { styles } from "./styles";',
+      'const pad = "p-6";',
+      'export const P = ({ className, x }: any) => (<>',
+      '  <Card className={cn("mt-4 grid gap-2", pad, className)} />',
+      '  <Card className={styles.card} />',
+      '  <Card className={getClasses(x)} />',
+      '  <Card render={() => <div className="bg-muted" />} />',
+      '</>);',
+    ].join('\n'),
+  });
+  const { out } = run(root, ['src/routes']);
+  assert.deepEqual(linesFor(out, 'src/routes/page.tsx'), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('typography utilities are found in built classNames on semantic elements', () => {
+  const root = project({
+    ...BUILT,
+    'src/routes/page.tsx': [
+      'const title = "text-2xl";',
+      'export const P = ({ big }: any) => (<>',
+      '  <h1 className={cn("mb-4", big && "font-semibold")}>A</h1>',
+      '  <h2 className={title}>B</h2>',
+      '  <p className={`max-w-md ${big ? "leading-tight" : ""}`}>C</p>',
+      '  <a className={cn("underline-offset-4")} href="#">D</a>',
+      '</>);',
+    ].join('\n'),
+  });
+  const { code, out } = run(root, ['src/routes']);
+  assert.equal(code, 1);
+  assert.deepEqual(linesFor(out, 'src/routes/page.tsx'), [
+    'src/routes/page.tsx:3: <h1> font-semibold (font weight) — the base layer already sets this',
+    'src/routes/page.tsx:4: <h2> text-2xl (text size) — the base layer already sets this',
+    'src/routes/page.tsx:5: <p> leading-tight (line height) — the base layer already sets this',
+  ]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('appearance overrides through a renamed import and in a wrapper outside the component directories', () => {
+  const root = project({
+    ...BUILT,
+    'src/routes/page.tsx': 'import { Card as Box } from "~/components/ui/card";\nexport const P = () => <Box className="bg-muted" />;\n',
+    'src/components/shared/panel.tsx': 'import { Card } from "../ui/card";\nexport const Panel = () => <Card className={cn("shadow-sm")} />;\n',
+  });
+  const { code, out } = run(root, ['src']);
+  assert.equal(code, 1);
+  assert.match(out, /src\/routes\/page\.tsx:2: <Box> bg-muted \(background\)/);
+  assert.match(out, /src\/components\/shared\/panel\.tsx:2: <Card> shadow-sm \(shadow\)/);
+  assert.match(out, /component directories not listed in components:[\s\S]*src\/components\/shared/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('a relative import from a sibling directory resolves to the component it points at', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui\ncomponents-ignore: src/components/shared\n',
+    'src/components/ui/popover.tsx': 'export const Popover = () => null;\n',
+    // "../ui/popover" never contains "components/ui"; only resolving the path finds it
+    'src/routes/page.tsx': 'import { Wrap } from "../components/shared/wrap";\n',
+    'src/components/shared/wrap.tsx': 'import { Popover } from "../ui/popover";\nexport const Wrap = () => <Popover />;\n',
+  });
+  const lint = run(root, ['src']);
+  assert.equal(lint.code, 1);
+  assert.match(lint.out, /src\/components\/shared\/wrap\.tsx  ->  components\/ui\/popover/);
+  const reg = run(root, ['--registry', 'src']);
+  assert.match(reg.out, /Unmarked but in use \(1\)\n  components\/ui\/popover\s+used in 1 file/);
+  rmSync(root, { recursive: true, force: true });
+});
