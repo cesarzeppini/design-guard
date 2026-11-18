@@ -1051,3 +1051,57 @@ test('--added-markers reports "unstyled by design" added to an existing marker l
   assert.match(out, /card\.tsx/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- --added-markers: only real markers count ----
+// It used to report any added line containing "@approved", anywhere in any file, so
+// the linter's own source, its tests and the README all read as approvals. In CI
+// that fails every PR that mentions the word.
+
+test('--added-markers ignores @approved mentioned in code, tests and docs', () => {
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE, 'README.md': '# x\n', 'src/lib.ts': 'x\n' });
+  commit('README.md', '# x\n\nAdd `// @approved` to a component file.\n\n\n\nMore: // @approved\n');
+  commit('src/lib.ts', 'const RE = /@approved/;\nconst s = "@approved";\n' + 'x\n'.repeat(40) + '// @approved\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 0, out);
+  assert.match(out, /No @approved markers added/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers ignores a marker below the 5-line window, and reports one moved into it', () => {
+  const below = 'a\nb\nc\nd\ne\n// @approved\nexport const Card = () => null;\n';
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE, 'src/components/ui/card.tsx': 'export const Card = () => null;\n' });
+  commit('src/components/ui/card.tsx', below);
+  const low = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(low.code, 0, low.out);
+
+  // deleting lines above pulls the existing marker into the window: no marker line
+  // is "added" in the diff, but the component is now approved
+  commit('src/components/ui/card.tsx', below.replace('a\nb\n', ''));
+  const up = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(up.code, 1);
+  assert.match(up.out, /card\.tsx/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers does not re-report a marker that was already there', () => {
+  const { root, commit } = gitRepo({
+    'design-guard.config': CONFIG_BASE,
+    'src/components/ui/card.tsx': '// @approved\nexport const Card = () => null;\n',
+  });
+  commit('src/components/ui/card.tsx', '// @approved\nexport const Card = () => <div />;\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 0, out);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers works from a project in a subdirectory of the repository', () => {
+  const { root, commit } = gitRepo({
+    'apps/web/design-guard.config': 'components: src/components/ui\n',
+    'apps/web/src/components/ui/card.tsx': 'export const Card = () => null;\n',
+  });
+  commit('apps/web/src/components/ui/card.tsx', '// @approved\nexport const Card = () => null;\n');
+  const { code, out } = run(join(root, 'apps/web'), ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /src\/components\/ui\/card\.tsx/);
+  rmSync(root, { recursive: true, force: true });
+});

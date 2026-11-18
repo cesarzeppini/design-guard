@@ -105,6 +105,27 @@ jobs:
 
 The job fails on any violation. Instructions to a model are advice; a failing check is enforcement. This is the piece that holds even when the assistant doesn't follow the rules.
 
+On pull requests it also runs the **approvals check** (`--added-markers` against the PR's base branch). This catches any PR that changes *what counts as approved*: a new `@approved` marker, a config edit that narrows the check, or a change to `allowed-customization.md`. Those items are listed in the job summary, and the job fails.
+
+That failure is deliberate, even when a person really did ask for the approval. The check can't tell who asked, so it makes sure a human looks before merging. The intended flow is that the reviewer reads the summary, confirms each item was requested, and merges anyway. If a red check on every approval is too much, report it as a warning instead:
+
+```yaml
+      - uses: cesarzeppini/design-guard@v0.1.0
+        with:
+          path: src
+          fail-on-approvals: false   # list approvals in the summary, don't fail
+```
+
+| Input | Default | |
+|---|---|---|
+| `path` | `src` | what to lint |
+| `working-directory` | `.` | project root, where `design-guard.config` lives |
+| `check-approvals` | `true` | run the approvals check on pull requests |
+| `base` | the PR's base branch | branch to compare against; set it to run the check on push events too |
+| `fail-on-approvals` | `true` | `false` reports approvals as a warning instead of failing |
+
+A shallow checkout (the `actions/checkout` default) works: the action fetches the history it needs. `fetch-depth: 0` on checkout skips that step.
+
 ### With Claude Code
 
 Copy `skill/` into your project as `.claude/skills/design-guard/`, and copy `scripts/` to the project root (the skill calls `node scripts/ds-lint.mjs`). The assistant runs the linter itself at the end of UI tasks.

@@ -185,7 +185,6 @@ function addedMarkers(range) {
     return 2;
   }
 
-  const found = new Set();
   const exceptions = new Map(); // allowed-customization.md path -> { added, removed }
   let file = null; // path on the new side; null when the file was deleted
   let oldFile = null;
@@ -203,7 +202,6 @@ function addedMarkers(range) {
       file = p === '/dev/null' ? null : p.replace(/^b\//, '');
     } else if (!inHeader && (line.startsWith('+') || line.startsWith('-'))) {
       const added = line.startsWith('+');
-      if (added && file && line.includes('@approved')) found.add(file);
       // The exceptions file is policy: any line in or out changes what counts
       // as allowed, so every change is reported, wording included.
       const policy = file ?? oldFile;
@@ -215,9 +213,10 @@ function addedMarkers(range) {
     }
   }
 
+  const found = markersAdded(range);
   const weakened = weakeningConfigChanges(range);
-  if (weakened === null) {
-    console.error(`ds-lint: cannot read the config at the start of "${range}"`);
+  if (found === null || weakened === null) {
+    console.error(`ds-lint: cannot read both ends of "${range}"`);
     return 2;
   }
 
@@ -254,6 +253,50 @@ function addedMarkers(range) {
   }
 
   return found.size > 0 || weakened.length > 0 || exceptions.size > 0 ? 1 : 0;
+}
+
+// A marker counts only where it confers approval: a marker comment within the
+// first MARKER_WINDOW lines. So a file is reported when, comparing the two ends of
+// the range, its marker lines in that window appeared or changed (a new marker, a
+// marker moved up into the window, or "unstyled by design" written onto one).
+// Code, tests and docs that merely mention @approved further down are not markers.
+function markerLines(text) {
+  if (text == null) return [];
+  return text
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .slice(0, MARKER_WINDOW)
+    .filter((l) => MARKER_RE.test(l))
+    .map((l) => l.trim());
+}
+
+function markersAdded(range) {
+  let ends;
+  let names;
+  try {
+    ends = rangeEnds(range);
+    // --relative: paths relative to (and limited to) the current directory, so a
+    // project in a subdirectory of the repository is read correctly.
+    names = execFileSync('git', ['diff', '--name-only', '--relative', '--diff-filter=d', range], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .split('\n')
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
+  const before = readAtRev(ends.base);
+  const after = ends.head === null ? readWorkingFile : readAtRev(ends.head);
+  const found = new Set();
+  for (const f of names) {
+    const now = markerLines(after(f));
+    if (now.length === 0) continue;
+    const was = new Set(markerLines(before(f)));
+    if (now.some((l) => !was.has(l))) found.add(f);
+  }
+  return found;
 }
 
 // Resolve a diff range to the two states it compares, the way `git diff` does:
