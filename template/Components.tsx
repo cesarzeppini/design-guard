@@ -21,6 +21,7 @@ const BADGE: Record<ComponentStatus, { label: string; tone: string }> = {
   'approved-unused': { label: 'Approved · unused', tone: 'muted' },
   'unmarked-in-use': { label: 'Not approved · in use', tone: 'warn' },
   'unmarked-unused': { label: 'Not approved · unused', tone: 'muted' },
+  deprecated: { label: 'Deprecated', tone: 'warn' },
 };
 
 const approvePrompt = (c: ComponentInfo) =>
@@ -102,7 +103,8 @@ export default function Components() {
   };
 
   const waiting = components.filter((c) => c.status === 'unmarked-in-use').sort((a, b) => b.usageCount - a.usageCount);
-  const approved = components.filter((c) => c.approved).sort((a, b) => b.usageCount - a.usageCount);
+  const approved = components.filter((c) => c.approved && !c.deprecated).sort((a, b) => b.usageCount - a.usageCount);
+  const deprecated = components.filter((c) => c.deprecated).sort((a, b) => b.usageCount - a.usageCount);
   const unused = components.filter((c) => c.status === 'unmarked-unused');
 
   const row = (c: ComponentInfo) => {
@@ -115,6 +117,7 @@ export default function Components() {
             <strong>{c.name}</strong>
             <span className={`dg-badge dg-${b.tone}`}>{b.label}</span>
             {c.unstyledByDesign && <span className="dg-badge dg-muted">Unstyled by design</span>}
+            {c.deprecated && c.replacement && <span className="dg-badge dg-muted">Use {c.replacement}</span>}
           </div>
           <code className="dg-path">{c.file}</code>
           {variantGroups.length > 0 && (
@@ -242,6 +245,8 @@ export default function Components() {
           </button>
         ))}
       {section('Approved', 'The current design system.', approved, 'Nothing approved yet — expected on a new project. Start with the most-used component above.')}
+      {deprecated.length > 0 &&
+        section('Deprecated', 'Being phased out: every use is flagged. Most-used first — the count is the migration left.', deprecated, '')}
       {unused.length > 0 && (
         <details className="dg-section">
           <summary><h2 style={{ display: 'inline' }}>Not approved · unused <span className="dg-count">{unused.length}</span></h2></summary>

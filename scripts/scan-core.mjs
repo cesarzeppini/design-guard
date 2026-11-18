@@ -68,6 +68,23 @@ export function resolveImportKey(fromFile, spec, componentDirs) {
   return m ? m[0] : null;
 }
 
+// A component is deprecated when @deprecated appears in a comment within the same
+// MARKER_WINDOW lines, optionally naming its replacement:
+//   // @deprecated → NewCard      /** @deprecated use NewCard */
+// Deprecation outranks approval: a deprecated component is on its way out
+// whether or not it was once approved, and every use is a finding.
+export const DEPRECATED_RE = /(^|[\s/*#{])@deprecated(?![\w-])(.*)$/;
+
+export function deprecationOf(text) {
+  for (const line of text.replace(/^\uFEFF/, '').split(/\r?\n/).slice(0, MARKER_WINDOW)) {
+    const m = line.match(DEPRECATED_RE);
+    if (!m) continue;
+    const r = m[2].match(/^\s*(?:→|->|=>|:|—|–|-)?\s*(?:use\s+)?([A-Z][A-Za-z0-9_]*)/);
+    return { replacement: r ? r[1] : null };
+  }
+  return null;
+}
+
 export const isMarkedText = (text) =>
   text.replace(/^\uFEFF/, '').split(/\r?\n/).slice(0, MARKER_WINDOW).some((l) => MARKER_RE.test(l));
 
@@ -235,6 +252,7 @@ export function scanProject({ files, componentDirs }) {
       const key = componentKey(dir, file);
       const usedBy = [...(importers.get(key) ?? [])].filter((f) => f !== file).sort();
       const approved = isMarkedText(src);
+      const deprecation = deprecationOf(src);
       const clean = stripComments(src);
       const props = propsOf(clean);
       const head = src.split('\n').slice(0, MARKER_WINDOW + 2).join('\n');
@@ -247,9 +265,13 @@ export function scanProject({ files, componentDirs }) {
         unstyledByDesign: approved && /unstyled/i.test(head),
         usageCount: usedBy.length,
         usedBy,
-        status: approved
-          ? usedBy.length ? 'approved' : 'approved-unused'
-          : usedBy.length ? 'unmarked-in-use' : 'unmarked-unused',
+        deprecated: !!deprecation,
+        replacement: deprecation?.replacement ?? null,
+        status: deprecation
+          ? 'deprecated'
+          : approved
+            ? usedBy.length ? 'approved' : 'approved-unused'
+            : usedBy.length ? 'unmarked-in-use' : 'unmarked-unused',
         props,
         variants: variantsOf(clean, props),
       });
@@ -262,7 +284,9 @@ export function scanProject({ files, componentDirs }) {
 // goes through approved components: each (file, component) import counts once.
 export function summarize(components, { files = {}, componentDirs = [], exclude = [] } = {}) {
   const count = (status) => components.filter((c) => c.status === status).length;
-  const approvedUse = components.filter((c) => c.approved).reduce((n, c) => n + c.usageCount, 0);
+  // A deprecated component is on its way out, so its usage doesn't count as adoption.
+  const live = (c) => c.approved && !c.deprecated;
+  const approvedUse = components.filter(live).reduce((n, c) => n + c.usageCount, 0);
   const totalUse = components.reduce((n, c) => n + c.usageCount, 0);
 
   // Raw interactive elements outside the system — the drift the page is meant to shrink.
@@ -282,8 +306,9 @@ export function summarize(components, { files = {}, componentDirs = [], exclude 
 
   return {
     total: components.length,
-    approved: components.filter((c) => c.approved).length,
+    approved: components.filter(live).length,
     approvedUnused: count('approved-unused'),
+    deprecated: count('deprecated'),
     decisionsWaiting: count('unmarked-in-use'),
     unused: count('unmarked-unused'),
     approvedUsage: approvedUse,

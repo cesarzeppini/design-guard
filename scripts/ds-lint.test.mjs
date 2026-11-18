@@ -1541,3 +1541,88 @@ test('a link styled as a button warns without failing the check', () => {
   assert.match(out, /Design system check: clean/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- @deprecated ----
+// Approval was binary, so a team couldn't say "we're phasing this out, use X".
+
+const DEP = {
+  'design-guard.config': 'components: src/components/ui\ntypography-base: false\n',
+  'src/components/ui/new-card.tsx': '// @approved\nexport const NewCard = () => null;\n',
+  'src/components/ui/card.tsx': '// @approved\n// @deprecated → NewCard\nexport const Card = () => null;\n',
+  'src/components/ui/panel.tsx': '/** @deprecated use NewCard */\nexport const Panel = () => null;\n',
+  'src/components/ui/box.tsx': '// @approved\n// @deprecated\nexport const Box = () => null;\n',
+  // not a deprecation: below the window, or a different word
+  'src/components/ui/tile.tsx': '// @approved\n// a\n// b\n// c\n// d\n// @deprecated → NewCard\nexport const Tile = () => null;\n',
+  'src/components/ui/chip.tsx': '// @approved\n// @deprecated-soon\nexport const Chip = () => null;\n',
+};
+
+test('every use of a deprecated component is flagged, naming the replacement', () => {
+  const root = project({
+    ...DEP,
+    'src/routes/page.tsx': [
+      'import { Card } from "@/components/ui/card";',
+      'import { Panel } from "@/components/ui/panel";',
+      'import { Box } from "@/components/ui/box";',
+      'import { NewCard } from "@/components/ui/new-card";',
+      'import { Tile } from "@/components/ui/tile";',
+      'import { Chip } from "@/components/ui/chip";',
+    ].join('\n'),
+  });
+  const { code, out } = run(root, ['src/routes']);
+  assert.equal(code, 1);
+  const section = out.split('== deprecated component in use\n')[1].split('\n\n')[0].split('\n');
+  assert.deepEqual(section, [
+    'src/routes/page.tsx  ->  components/ui/box',
+    'src/routes/page.tsx  ->  components/ui/card  (use NewCard instead)',
+    'src/routes/page.tsx  ->  components/ui/panel  (use NewCard instead)',
+  ]);
+  // Panel is unapproved too, but deprecation is the one finding; Tile and Chip aren't deprecated
+  assert.doesNotMatch(out, /component used but not marked @approved/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('a deprecated component may still be used inside the component directories', () => {
+  const root = project({
+    ...DEP,
+    'src/components/ui/legacy-list.tsx': '// @approved\nimport { Card } from "./card";\nexport const LegacyList = () => <Card />;\n',
+  });
+  const { out } = run(root, ['src']);
+  assert.doesNotMatch(out, /deprecated component in use/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('registry lists deprecated components apart, most-used first, with the replacement', () => {
+  const root = project({
+    ...DEP,
+    'src/routes/a.tsx': 'import { Card } from "@/components/ui/card";\nimport { Box } from "@/components/ui/box";\n',
+    'src/routes/b.tsx': 'import { Card } from "@/components/ui/card";\n',
+  });
+  const { out } = run(root, ['--registry', 'src']);
+  const approved = out.split('Approved (')[1].split('\n\n')[0];
+  assert.doesNotMatch(approved, /components\/ui\/card\b|components\/ui\/box\b/);
+  assert.match(out, /Deprecated \(3\)\n  components\/ui\/card\s+used in 2 file\(s\)  -> NewCard\n  components\/ui\/box\s+used in 1 file\(s\)\n  components\/ui\/panel\s+used in 0 file\(s\)  -> NewCard/);
+  const by = Object.fromEntries(scan(root, ['src']).map((c) => [c.name, c]));
+  assert.equal(by.Card.status, 'deprecated');
+  assert.equal(by.Card.replacement, 'NewCard');
+  assert.equal(by.Box.replacement, null);
+  assert.equal(by.Tile.deprecated, false);
+  assert.equal(by.Chip.deprecated, false);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports deprecations added, lifted and changed', () => {
+  const { root, commit } = gitRepo({
+    'design-guard.config': 'components: src/components/ui\n',
+    'src/components/ui/a.tsx': '// @approved\nexport const A = () => null;\n',
+    'src/components/ui/b.tsx': '// @approved\n// @deprecated → A\nexport const B = () => null;\n',
+    'src/components/ui/c.tsx': '// @approved\n// @deprecated → A\nexport const C = () => null;\n',
+  });
+  commit('src/components/ui/a.tsx', '// @approved\n// @deprecated → B\nexport const A = () => null;\n');
+  commit('src/components/ui/b.tsx', '// @approved\nexport const B = () => null;\n');
+  commit('src/components/ui/c.tsx', '// @approved\n// @deprecated → B\nexport const C = () => null;\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /No @approved markers added/);
+  assert.match(out, /== @deprecated markers changed in main\.\.\.HEAD\n  src\/components\/ui\/a\.tsx  \(added\)\n  src\/components\/ui\/b\.tsx  \(removed\)\n  src\/components\/ui\/c\.tsx  \(changed\)/);
+  rmSync(root, { recursive: true, force: true });
+});
