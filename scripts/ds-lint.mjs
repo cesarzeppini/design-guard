@@ -727,13 +727,28 @@ const PATTERNS = [
 // nothing, the utilities ARE the styling and this would fire on every heading.
 const TYPOGRAPHIC_ELEMENTS = 'h1|h2|h3|h4|h5|h6|p|a|strong|blockquote|li|label|legend';
 
+// The utility a class applies, without its variants: `md:hover:bg-x` and
+// `data-[state=open]:bg-x` both give `bg-x`. Splits on the last ":" outside
+// brackets, so an arbitrary value containing ":" stays whole.
+function utilityOf(cls) {
+  let depth = 0;
+  let cut = 0;
+  for (let i = 0; i < cls.length; i++) {
+    const c = cls[i];
+    if (c === '[' || c === '(') depth++;
+    else if (c === ']' || c === ')') depth--;
+    else if (c === ':' && depth === 0) cut = i + 1;
+  }
+  return cls.slice(cut);
+}
+
 const TEXT_SIZES = new Set(['xs', 'sm', 'base', 'lg', 'xl', '2xl', '3xl', '4xl', '5xl', '6xl', '7xl', '8xl', '9xl']);
 const FONT_WEIGHTS = new Set(['thin', 'extralight', 'light', 'normal', 'medium', 'semibold', 'bold', 'extrabold', 'black']);
 // Alignment and wrapping are layout, not typography — legal on any element.
 const TEXT_LAYOUT = new Set(['left', 'center', 'right', 'justify', 'start', 'end', 'wrap', 'nowrap', 'balance', 'pretty', 'ellipsis', 'clip']);
 
 function typographyViolation(cls) {
-  const bare = cls.replace(/^[a-z-]+:/, ''); // drop variants like md: or hover:
+  const bare = utilityOf(cls); // drop variants like md:hover: or data-[state=open]:
   if (bare.startsWith('font-') && FONT_WEIGHTS.has(bare.slice(5))) return 'font weight';
   if (bare.startsWith('tracking-')) return 'letter spacing';
   if (bare.startsWith('leading-')) return 'line height';
@@ -917,7 +932,7 @@ function systemTagsIn(file) {
 // `text-center` and friends are layout; `border` bare is a width, not a colour.
 // Everything else in this shape changes appearance.
 function appearanceViolation(cls) {
-  const bare = cls.replace(/^([a-z0-9-]+:)+/, '').replace(/^!/, '');
+  const bare = utilityOf(cls).replace(/^!/, '');
   if (bare.startsWith('text-')) {
     const v = bare.slice(5);
     if (TEXT_LAYOUT.has(v)) return null;
@@ -1149,9 +1164,9 @@ const INTERACTIVE_ROLES = new Set([
 
 // A link carrying a surface (background), a shape (rounded) and padding is a
 // button in a link's clothes. A heuristic, so it warns rather than fails.
-const isSurface = (c) => /^(bg-(?!transparent\b|none\b)|bg-\[)/.test(c.replace(/^([a-z0-9-]+:)+/, ''));
-const isShape = (c) => /^rounded(-|$)/.test(c.replace(/^([a-z0-9-]+:)+/, ''));
-const isPadding = (c) => /^p[xytrbl]?-/.test(c.replace(/^([a-z0-9-]+:)+/, ''));
+const isSurface = (c) => /^(bg-(?!transparent\b|none\b)|bg-\[)/.test(utilityOf(c));
+const isShape = (c) => /^rounded(-|$)/.test(utilityOf(c));
+const isPadding = (c) => /^p[xytrbl]?-/.test(utilityOf(c));
 
 function handRolledHits(files) {
   const errors = [];
@@ -1185,6 +1200,104 @@ function handRolledHits(files) {
     }
   }
   return { errors, warnings };
+}
+
+// ---- colour utilities that aren't one of the project's tokens ----
+//
+// The palette check catches Tailwind's defaults (bg-white, text-gray-500). A
+// project's own off-system colour (bg-brand-legacy, text-promo) passed: it isn't
+// the default palette, and nothing compared it with the tokens the project
+// actually defines. The tokens are read from the project's CSS at check time:
+//   --color-<name>: …   Tailwind v4 @theme (shadcn v4 maps its tokens this way)
+//   --<name>: <colour>  CSS variables with a colour value (shadcn v3's :root/.dark)
+// A colour utility on a plain element or a third-party component must use one of
+// them. Design-system components aren't checked here: any appearance class on
+// them is already an override finding.
+
+const COLOUR_PREFIXES = ['bg', 'text', 'border', 'ring', 'outline', 'shadow', 'decoration', 'fill', 'stroke',
+  'divide', 'from', 'via', 'to', 'accent', 'caret', 'placeholder'];
+const PALETTE_RE = /^(white|black|gray|slate|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)(-[0-9]{2,3})?$/;
+const ALWAYS_OK = new Set(['transparent', 'current', 'currentColor', 'inherit']);
+// Values that share a colour prefix but aren't colours.
+const NON_COLOUR = {
+  bg: /^(fixed|local|scroll|auto|cover|contain|none|repeat|no-repeat|repeat-[xy]|repeat-round|repeat-space|bottom|center|left|left-bottom|left-top|right|right-bottom|right-top|top|(clip|origin|blend|gradient|linear|radial|conic|position|size)-.*)$/,
+  text: /^(left|center|right|justify|start|end|wrap|nowrap|balance|pretty|ellipsis|clip|xs|sm|base|lg|xl|[2-9]xl|shadow.*)$/,
+  border: /^(dashed|solid|dotted|double|hidden|none|collapse|separate|spacing.*)$/,
+  ring: /^(inset)$/,
+  outline: /^(none|dashed|dotted|double|solid|hidden)$/,
+  shadow: /^(xs|sm|md|lg|xl|2xl|inner|none)$/,
+  decoration: /^(solid|double|dotted|dashed|wavy|auto|from-font|clone|slice)$/,
+  fill: /^(none)$/,
+  stroke: /^(none)$/,
+  divide: /^(x|y|x-reverse|y-reverse|dashed|solid|dotted|double|none)$/,
+  accent: /^(auto)$/,
+  caret: /^(auto)$/,
+};
+
+// Looks like a CSS colour value: named functions, hex, or shadcn v3's bare
+// "222.2 84% 4.9%" HSL channels.
+const COLOUR_VALUE_RE = /^(#[0-9a-f]{3,8}\b|(rgb|rgba|hsl|hsla|oklch|oklab|lab|lch|color|color-mix|light-dark)\(|var\(--|-?\d+(\.\d+)?(deg)?\s+-?\d+(\.\d+)?%\s+-?\d+(\.\d+)?%)/i;
+
+function projectColourTokens() {
+  const tokens = new Set();
+  const utilities = new Set(); // class names the project defines itself
+  for (const f of filesUnder('.', ['.css', '.scss'])) {
+    const css = readLines(f).join('\n');
+    for (const m of css.matchAll(/--color-([A-Za-z0-9_-]+)\s*:\s*([^;]+);/g)) {
+      if (m[1] !== '*' && !/^initial$/.test(m[2].trim())) tokens.add(m[1]);
+    }
+    for (const m of css.matchAll(/--([A-Za-z][A-Za-z0-9_-]*)\s*:\s*([^;]+);/g)) {
+      if (!m[1].startsWith('color-') && COLOUR_VALUE_RE.test(m[2].trim())) tokens.add(m[1]);
+    }
+    for (const m of css.matchAll(/@utility\s+([A-Za-z0-9_-]+)/g)) utilities.add(m[1]);
+    for (const m of css.matchAll(/\.([A-Za-z][A-Za-z0-9_-]*)(?=[\s,{:.>+~[])/g)) utilities.add(m[1]);
+  }
+  return { tokens, utilities };
+}
+
+// The colour a utility names, or null when it isn't a colour utility at all.
+function colourOf(cls) {
+  const bare = utilityOf(cls).replace(/^!/, '').replace(/!$/, '');
+  const m = bare.match(new RegExp(`^(${COLOUR_PREFIXES.join('|')})-(.+)$`));
+  if (!m) return null;
+  let [, prefix, value] = m;
+  value = value.replace(/\/[\w.[\]%-]+$/, ''); // opacity modifier: bg-primary/50
+  if (prefix === 'border' || prefix === 'divide') value = value.replace(/^(x|y|t|r|b|l|s|e)-/, '');
+  if (prefix === 'ring' || prefix === 'outline') value = value.replace(/^offset-/, '');
+  if (/^[\d[(]/.test(value) || !/[a-z]/i.test(value)) return null; // sizes, arbitrary values (own check)
+  if (NON_COLOUR[prefix]?.test(value)) return null;
+  if (prefix === 'border' && /^(x|y|t|r|b|l|s|e)$/.test(value)) return null;
+  return value;
+}
+
+const ANY_OPEN_TAG_RE = /<([A-Za-z][\w.]*)(?![\w-])/g;
+
+function tokenHits(files) {
+  const found = [];
+  let seen = false; // any custom colour utility at all — decides whether "no tokens" is worth saying
+  let project = null;
+  for (const f of files) {
+    const text = readLines(f).join('\n');
+    if (!/className=/.test(text)) continue;
+    const system = systemTagsIn(f);
+    const consts = fileConstants(text);
+    ANY_OPEN_TAG_RE.lastIndex = 0;
+    let m;
+    while ((m = ANY_OPEN_TAG_RE.exec(text))) {
+      if (system.has(m[1])) continue;
+      const classes = classTokensOf(tagBodyAt(text, ANY_OPEN_TAG_RE.lastIndex), consts);
+      for (const cls of classes) {
+        const colour = colourOf(cls);
+        if (!colour || ALWAYS_OK.has(colour) || PALETTE_RE.test(colour)) continue; // palette: its own check
+        seen = true;
+        project ??= projectColourTokens();
+        if (project.tokens.size === 0 || project.tokens.has(colour) || project.utilities.has(utilityOf(cls))) continue;
+        const line = text.slice(0, m.index).split('\n').length;
+        found.push(`${f}:${line}: <${m[1]}> ${cls} — "${colour}" is not a colour token`);
+      }
+    }
+  }
+  return { found, noTokens: seen && project !== null && project.tokens.size === 0 };
 }
 
 function unlistedComponentDirs() {
@@ -1281,6 +1394,23 @@ function lint(targets) {
       console.log('   stops once the decision is written down.');
       console.log('');
     }
+  }
+
+  const tokenCheck = tokenHits(files);
+  if (tokenCheck.found.length) {
+    console.log("== colour utility that isn't a project token");
+    [...new Set(tokenCheck.found)].forEach((l) => console.log(l));
+    console.log('');
+    console.log("   Tokens are read from the project's CSS (--color-* in @theme, or colour");
+    console.log('   variables like --primary). Use the token that matches; if none does, that');
+    console.log('   is a design decision: park it and propose the token.');
+    console.log('');
+    hits = 1;
+  } else if (tokenCheck.noTokens) {
+    console.log('== token check off — no colour tokens found in the project CSS');
+    console.log('   Custom colour utilities are in use, but no --color-* or colour variables were');
+    console.log('   found to check them against. Only the default palette is being checked.');
+    console.log('');
   }
 
   const handRolled = handRolledHits(files);

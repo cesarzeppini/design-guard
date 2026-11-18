@@ -111,7 +111,7 @@ Allowed customization is narrow: approved `variant` / `size` props plus layout c
 
 ### Tokens
 
-Don't maintain a color allowlist by hand. If the project has a tokens file (e.g. `tokens.css`), derive the allowlist from it at check time: every semantic token defined there is allowed on a **plain element**; anything else is a violation there. **On an approved design-system component, no override is allowed — token or not.** The tokens file says what a raw `<div>` may use; it does not reopen an approved component's own appearance.
+Don't maintain a color allowlist by hand. The linter derives it from the project's CSS at check time: every `--color-<name>` (Tailwind v4 `@theme`, which is how shadcn v4 maps its tokens) and every CSS variable whose value is a colour (shadcn v3's `--primary: 222.2 47.4% 11.2%` in `:root` / `.dark`). On a **plain element** or a third-party component, a colour utility (`bg-`, `text-`, `border-`, `ring-`, `fill-`…) must name one of them; anything else is flagged, including `bg-brand-legacy` that isn't Tailwind's palette. Classes the project defines itself (`@utility`, or a `.class` in its CSS) are left alone. If no colour tokens are found, the check says so once and only the default palette is checked. **On an approved design-system component, no override is allowed — token or not.** The tokens say what a raw `<div>` may use; they do not reopen an approved component's own appearance.
 
 ### Violation 3 — no token exception
 

@@ -1626,3 +1626,158 @@ test('--added-markers reports deprecations added, lifted and changed', () => {
   assert.match(out, /== @deprecated markers changed in main\.\.\.HEAD\n  src\/components\/ui\/a\.tsx  \(added\)\n  src\/components\/ui\/b\.tsx  \(removed\)\n  src\/components\/ui\/c\.tsx  \(changed\)/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- colour utilities that aren't project tokens ----
+// Only Tailwind's default palette was checked. A project's own off-system colour
+// (bg-brand-legacy) passed, though SKILL said tokens were derived from the CSS.
+
+// shadcn v4 style: colour variables in :root/.dark, mapped through @theme inline.
+const SHADCN_V4_CSS = `@import "tailwindcss";
+@custom-variant dark (&:is(.dark *));
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --sidebar: oklch(0.985 0 0);
+}
+.dark { --background: oklch(0.145 0 0); }
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-brand-500: oklch(0.6 0.2 250);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+@utility bg-grid { background-image: none; }
+`;
+
+// shadcn v3 style: bare HSL channels in :root, mapped in tailwind.config.
+const SHADCN_V3_CSS = `@tailwind base;
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --primary: 222.2 47.4% 11.2%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --border: 214.3 31.8% 91.4%;
+    --chart-1: 12 76% 61%;
+    --radius: 0.5rem;
+  }
+}
+`;
+
+const tokenLines = (out) => out.split('\n').filter((l) => / is not a colour token$/.test(l));
+
+test('real shadcn class names against shadcn v4 tokens: no findings', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui\ntypography-base: false\n',
+    'src/index.css': SHADCN_V4_CSS,
+    'src/routes/page.tsx': [
+      'export const P = ({ a }: any) => (<div className="flex min-h-svh flex-col bg-background text-foreground">',
+      '  <header className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60" />',
+      '  <nav className="hover:bg-accent hover:text-accent-foreground data-[state=open]:bg-accent/50 focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none" />',
+      '  <p className="text-sm text-muted-foreground text-balance text-left">x</p>',
+      '  <span className="bg-clip-text bg-linear-to-r from-primary to-transparent text-transparent" />',
+      '  <aside className="border-l-4 border-x-transparent ring-1 ring-inset ring-offset-2 ring-offset-background shadow-xs shadow-none divide-y" />',
+      '  <svg className="fill-current stroke-2 size-4 text-destructive" />',
+      '  <input className="placeholder:text-muted-foreground accent-primary caret-primary border-input aria-invalid:border-destructive" />',
+      '  <div className="bg-grid bg-sidebar bg-brand-500 outline-hidden decoration-wavy underline-offset-4 bg-cover bg-center bg-no-repeat" />',
+      '  <div className={cn("rounded-md border", a ? "bg-muted" : "bg-primary text-primary-foreground")} />',
+      '</div>);',
+    ].join('\n'),
+  });
+  const { out } = run(root, ['src/routes']);
+  assert.deepEqual(tokenLines(out), []);
+  assert.doesNotMatch(out, /token check off/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('flags colours that are not tokens, on plain elements and built classNames (v4 and v3 CSS)', () => {
+  for (const css of [SHADCN_V4_CSS, SHADCN_V3_CSS]) {
+    const root = project({
+      'design-guard.config': 'components: src/components/ui\ntypography-base: false\n',
+      'src/components/ui/card.tsx': '// @approved\nexport const Card = (p: any) => null;\n',
+      'src/styles/globals.css': css,
+      'src/routes/page.tsx': [
+        'import { Card } from "@/components/ui/card";',
+        'const promo = "text-promo";',
+        'export const P = ({ on }: any) => (<>',
+        '  <div className="bg-brand-legacy p-4" />',
+        '  <span className={cn("hover:border-sunset/50", on && "data-[state=open]:ring-offset-highlight")} />',
+        '  <p className={promo} />',
+        '  <Card className="bg-brand-legacy" />',
+        '  <Badge className="text-foreground" />',
+        '</>);',
+      ].join('\n'),
+    });
+    const { code, out } = run(root, ['src/routes']);
+    assert.equal(code, 1);
+    assert.deepEqual(tokenLines(out), [
+      'src/routes/page.tsx:4: <div> bg-brand-legacy — "brand-legacy" is not a colour token',
+      'src/routes/page.tsx:5: <span> hover:border-sunset/50 — "sunset" is not a colour token',
+      'src/routes/page.tsx:5: <span> data-[state=open]:ring-offset-highlight — "highlight" is not a colour token',
+      'src/routes/page.tsx:6: <p> text-promo — "promo" is not a colour token',
+    ]);
+    // the design-system Card's class is an override finding, not a token finding
+    assert.match(out, /<Card> bg-brand-legacy \(background\)/);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('no colour tokens in the CSS: the check is off and says so once, only when custom colours are used', () => {
+  const custom = project({
+    'design-guard.config': 'components: src/components/ui\ntypography-base: false\n',
+    'src/components/ui/card.tsx': '// @approved\nexport const Card = () => null;\n',
+    'src/routes/page.tsx': 'export const P = () => <><div className="bg-brand" /><div className="text-promo" /></>;\n',
+  });
+  const a = run(custom, ['src/routes']);
+  assert.equal(a.code, 0, a.out);
+  assert.equal(a.out.match(/token check off/g)?.length, 1);
+  rmSync(custom, { recursive: true, force: true });
+
+  const plain = project({
+    'design-guard.config': 'components: src/components/ui\ntypography-base: false\n',
+    'src/components/ui/card.tsx': '// @approved\nexport const Card = () => null;\n',
+    'src/routes/page.tsx': 'export const P = () => <div className="flex p-4 text-sm" />;\n',
+  });
+  assert.doesNotMatch(run(plain, ['src/routes']).out, /token check off/);
+  rmSync(plain, { recursive: true, force: true });
+});
+
+test('variants with brackets or several prefixes are stripped before every class check', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui\ntypography-base: true\n',
+    'src/components/ui/card.tsx': '// @approved\nexport const Card = (p: any) => null;\n',
+    'src/routes/page.tsx': [
+      'import { Card } from "@/components/ui/card";',
+      'export const P = () => (<>',
+      '  <Card className="data-[state=open]:bg-muted" />',
+      '  <h1 className="md:hover:text-xl">A</h1>',
+      '</>);',
+    ].join('\n'),
+  });
+  const { out } = run(root, ['src/routes']);
+  assert.match(out, /<Card> data-\[state=open\]:bg-muted \(background\)/);
+  assert.match(out, /<h1> md:hover:text-xl \(text size\)/);
+  rmSync(root, { recursive: true, force: true });
+});
