@@ -47,7 +47,7 @@ The config gets the same treatment. Ignoring a directory in `design-guard.config
 | # | Violation | Example |
 |---|---|---|
 | 1 | Raw HTML for core UI | `<button>`, `<input>`, hand-rolled modals |
-| 2 | Off-system component | a component with no `@approved` marker, or a duplicate of one that has it |
+| 2 | Off-system component | a component with no `@approved` marker, a duplicate of one that has it, or a variant it doesn't have (`<Button variant="ghostly">`) |
 | 3 | Appearance override on an approved component | `<Card className="bg-muted">` — **semantic tokens included** — or `<Button {...props}>`, which forwards any caller's `className` (form wiring like `{...field}` is allowed) |
 | 4 | Typography utilities on semantic elements | `<h1 className="text-2xl font-semibold">` when the base layer already styles `h1` |
 
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: cesarzeppini/design-guard@v0.2.1
+      - uses: cesarzeppini/design-guard@v0.3.0
         with:
           path: src
 ```
@@ -110,7 +110,7 @@ On pull requests it also runs the **approvals check** (`--added-markers` against
 That failure is deliberate, even when a person really did ask for the approval. The check can't tell who asked, so it makes sure a human looks before merging. The intended flow is that the reviewer reads the summary, confirms each item was requested, and merges anyway. If a red check on every approval is too much, report it as a warning instead:
 
 ```yaml
-      - uses: cesarzeppini/design-guard@v0.2.1
+      - uses: cesarzeppini/design-guard@v0.3.0
         with:
           path: src
           fail-on-approvals: false   # list approvals in the summary, don't fail
