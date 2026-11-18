@@ -1093,6 +1093,58 @@ function variantHits(files) {
   return found;
 }
 
+// ---- hand-rolled interactive elements ----
+//
+// <button> and friends are caught by pattern. The same control built from a plain
+// element is not: `<div role="button" onClick={…}>` styled to look like Button.
+// An interactive role or an onClick on a plain element means a control was built
+// by hand instead of taken from the system (and usually without keyboard support).
+const HAND_ROLLED_OPEN_RE = /<(div|span|a|li)(?![\w-])/g;
+const INTERACTIVE_ROLES = new Set([
+  'button', 'tab', 'tablist', 'dialog', 'alertdialog', 'menu', 'menuitem',
+  'checkbox', 'switch', 'radio', 'combobox', 'listbox',
+]);
+
+// A link carrying a surface (background), a shape (rounded) and padding is a
+// button in a link's clothes. A heuristic, so it warns rather than fails.
+const isSurface = (c) => /^(bg-(?!transparent\b|none\b)|bg-\[)/.test(c.replace(/^([a-z0-9-]+:)+/, ''));
+const isShape = (c) => /^rounded(-|$)/.test(c.replace(/^([a-z0-9-]+:)+/, ''));
+const isPadding = (c) => /^p[xytrbl]?-/.test(c.replace(/^([a-z0-9-]+:)+/, ''));
+
+function handRolledHits(files) {
+  const errors = [];
+  const warnings = [];
+  for (const f of files) {
+    const text = readLines(f).join('\n');
+    if (!/<(div|span|a|li)\b/.test(text)) continue;
+    const consts = fileConstants(text);
+    HAND_ROLLED_OPEN_RE.lastIndex = 0;
+    let m;
+    while ((m = HAND_ROLLED_OPEN_RE.exec(text))) {
+      const tag = m[1];
+      const body = tagBodyAt(text, HAND_ROLLED_OPEN_RE.lastIndex);
+      const attrs = topLevelAttrs(body);
+      const line = text.slice(0, m.index).split('\n').length;
+      const why = [];
+      const role = attrs.match(/(?:^|\s)role=(?:"([^"]*)"|'([^']*)'|\{\s*["']([^"']*)["']\s*\})/);
+      const roleValue = role && (role[1] ?? role[2] ?? role[3]);
+      if (roleValue && INTERACTIVE_ROLES.has(roleValue)) why.push(`role="${roleValue}"`);
+      if ((tag === 'div' || tag === 'span') && /(?:^|\s)onClick=/.test(attrs)) why.push('onClick');
+      if (why.length) {
+        errors.push(`${f}:${line}: <${tag} ${why.join(' ')}>`);
+        continue;
+      }
+      if (tag === 'a') {
+        const cls = classTokensOf(body, consts);
+        if (cls.some(isSurface) && cls.some(isShape) && cls.some(isPadding)) {
+          warnings.push(`${f}:${line}: <a> ${cls.filter((c) => isSurface(c) || isShape(c) || isPadding(c)).join(' ')}`);
+        }
+      }
+    }
+  }
+  return { errors, warnings };
+}
+
 function unlistedComponentDirs() {
   // Component directories the project has but `components:` doesn't list. Without
   // this, an incomplete key narrows the check silently: an unlisted directory is
@@ -1189,6 +1241,18 @@ function lint(targets) {
     }
   }
 
+  const handRolled = handRolledHits(files);
+  if (handRolled.errors.length) {
+    console.log('== hand-rolled interactive element');
+    handRolled.errors.forEach((l) => console.log(l));
+    console.log('');
+    console.log('   A plain element given an interactive role or a click handler is a control');
+    console.log('   built by hand. Use the design-system component (Button, Tabs, Dialog,');
+    console.log('   Checkbox...). If none exists, park it and propose one.');
+    console.log('');
+    hits = 1;
+  }
+
   const variants = variantHits(files);
   if (variants.length) {
     console.log("== variant or size the component doesn't declare");
@@ -1271,6 +1335,16 @@ function lint(targets) {
     [...unapproved].sort().forEach((l) => console.log(l));
     console.log('');
     hits = 1;
+  }
+
+  if (handRolled.warnings.length) {
+    console.log('== warning (does not fail the check): link styled as a button');
+    handRolled.warnings.forEach((l) => console.log(l));
+    console.log('');
+    console.log('   A link with a background, rounded corners and padding is usually a button');
+    console.log('   in disguise. If it should look like one, use Button (asChild, or its link');
+    console.log('   variant) so it stays in the system. A heuristic: judge each one.');
+    console.log('');
   }
 
   if (hits === 0) console.log('Design system check: clean');

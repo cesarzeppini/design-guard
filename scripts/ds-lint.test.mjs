@@ -1466,3 +1466,78 @@ test('a relative import from a sibling directory resolves to the component it po
   assert.match(reg.out, /Unmarked but in use \(1\)\n  components\/ui\/popover\s+used in 1 file/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- hand-rolled interactive elements ----
+// <button> was caught; <div role="button" onClick> styled like Button was not.
+
+const HAND = { 'design-guard.config': 'components: src/components/ui\ntypography-base: false\n',
+  'src/components/ui/button.tsx': '// @approved\nexport const Button = (p: any) => null;\n' };
+
+test('flags interactive roles and click handlers on plain elements', () => {
+  const root = project({
+    ...HAND,
+    'src/routes/page.tsx': [
+      'export const P = ({ go }: any) => (<>',
+      '  <div role="button" onClick={go} className="rounded-md bg-primary px-4 py-2">Save</div>',
+      '  <span onClick={() => go()}>x</span>',
+      '  <li role="tab">Tab</li>',
+      '  <a role={"menuitem"} href="#">Item</a>',
+      '  <div',
+      '    role="switch"',
+      '    aria-checked={true}',
+      '  />',
+      '</>);',
+    ].join('\n'),
+  });
+  const { code, out } = run(root, ['src/routes']);
+  assert.equal(code, 1);
+  assert.deepEqual(linesFor(out, 'src/routes/page.tsx'), [
+    'src/routes/page.tsx:2: <div role="button" onClick>',
+    'src/routes/page.tsx:3: <span onClick>',
+    'src/routes/page.tsx:4: <li role="tab">',
+    'src/routes/page.tsx:5: <a role="menuitem">',
+    'src/routes/page.tsx:6: <div role="switch">',
+  ]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('hand-rolled check leaves non-interactive roles, links, components and nested props alone', () => {
+  const root = project({
+    ...HAND,
+    'src/routes/page.tsx': [
+      'import { Button } from "@/components/ui/button";',
+      'export const P = ({ go }: any) => (<>',
+      '  <div role="presentation" /><section role="region" /><div role="list" />',
+      '  <Button onClick={go}>ok</Button>',
+      '  <a href="/x" onClick={go}>link with a handler</a>',
+      '  <div className="rounded-lg bg-muted p-4">a card-like box is not a control</div>',
+      // the outer div doesn't inherit onClick from a component nested in one of its props
+      '  <div data-slot={() => <Button onClick={go} />} />',
+      '  <divider onClick={go} />',
+      '</>);',
+    ].join('\n'),
+  });
+  const { out } = run(root, ['src/routes']);
+  assert.doesNotMatch(out, /hand-rolled interactive element/);
+  assert.doesNotMatch(out, /link styled as a button/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('a link styled as a button warns without failing the check', () => {
+  const root = project({
+    ...HAND,
+    'src/routes/page.tsx': [
+      'export const P = ({ big }: any) => (<>',
+      '  <a href="/start" className={cn("inline-flex rounded-md bg-primary px-4 py-2", big && "h-10")}>Start</a>',
+      '  <a href="/x" className="bg-muted">only a background</a>',
+      '  <a href="/y" className="rounded-md bg-transparent px-2 py-1">transparent</a>',
+      '</>);',
+    ].join('\n'),
+  });
+  const { code, out } = run(root, ['src/routes']);
+  assert.equal(code, 0, out);
+  assert.match(out, /warning \(does not fail the check\): link styled as a button/);
+  assert.deepEqual(linesFor(out, 'src/routes/page.tsx'), ['src/routes/page.tsx:2: <a> rounded-md bg-primary px-4 py-2']);
+  assert.match(out, /Design system check: clean/);
+  rmSync(root, { recursive: true, force: true });
+});

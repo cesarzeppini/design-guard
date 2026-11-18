@@ -84,12 +84,12 @@ Never treat an omission as deliberate. A deliberate exclusion is written down in
 
 | # | Violation | Examples |
 | --- | --- | --- |
-| 1 | Raw HTML for core UI | `<button>`, `<input>`, `<select>`, `<textarea>`, hand-rolled card / modal / dropdown / tab `<div>` structures |
+| 1 | Raw HTML for core UI | `<button>`, `<input>`, `<select>`, `<textarea>`, a plain element with an interactive role or click handler (`<div role="button" onClick>`, `<li role="tab">`, `<span onClick>`), hand-rolled card / modal / dropdown / tab `<div>` structures |
 | 2 | Off-system component | local component duplicating an `@approved` one; component in a components directory with no `@approved` marker; a `variant` / `size` value the component doesn't declare (`<Button variant="ghostly">`) |
 | 3 | Appearance override on a design-system component | `<Card className="bg-muted">`, `border-*`, `ring-*`, `shadow-*`, `rounded-*`, `font-*`, `opacity-*` on an approved component, raw hex/`rgb()`, non-token utilities like `bg-white` `text-black` `text-[#333]`, `!important`, `<Button {...props}>` (a spread forwards `className` and `style` unchecked; form wiring like `{...field}` / `{...register('x')}` is fine) |
 | 4 | Typography utilities on semantic text elements | `<h1 className="text-2xl font-semibold">` — the base layer already sets size, weight, colour, tracking and leading on `<h1>`–`<h6>`, `<p>`, `<a>`, `<strong>`, `<blockquote>`, `<li>`, `<label>`, `<legend>` |
 
-Plain layout wrappers (`<div>`, `<section>`, `<span>`, `<ul>`) are fine. The rule targets interactive controls and visual surfaces, not structure.
+Plain layout wrappers (`<div>`, `<section>`, `<span>`, `<ul>`) are fine. The rule targets interactive controls and visual surfaces, not structure. The linter also *warns* (without failing) on a link styled as a button (background + rounded + padding on an `<a>`). That one is a judgement call: use `Button` if it should look like one.
 
 Allowed customization is narrow: approved `variant` / `size` props plus layout classes (spacing, flex, grid, width, position, alignment). See `allowed-customization.md` for the full allowlist before deciding an override is acceptable.
 
