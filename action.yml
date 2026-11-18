@@ -1,5 +1,5 @@
 name: Design Guard
-description: Fail the build when UI code drifts from the approved design system.
+description: Fail the build when UI code drifts from the approved design system, or when a PR changes what counts as approved.
 inputs:
   path:
     description: File or directory to lint
@@ -7,12 +7,79 @@ inputs:
   working-directory:
     description: Project root (where design-guard.config lives)
     default: .
+  check-approvals:
+    description: >-
+      On pull requests, also report @approved markers added, config edits that
+      narrow the check, and changes to allowed-customization.md.
+    default: 'true'
+  base:
+    description: Branch to compare against. Defaults to the pull request's base branch.
+    default: ''
+  fail-on-approvals:
+    description: >-
+      Fail the job when the approvals check finds something (the default), so a
+      human has to look before merging. Set to 'false' to report it as a warning instead.
+    default: 'true'
 runs:
   using: composite
   steps:
     - uses: actions/setup-node@v4
       with:
         node-version: 20
-    - shell: bash
+
+    - name: Lint
+      shell: bash
       working-directory: ${{ inputs.working-directory }}
-      run: node "${{ github.action_path }}/scripts/ds-lint.mjs" "${{ inputs.path }}"
+      env:
+        DG_SCRIPT: ${{ github.action_path }}/scripts/ds-lint.mjs
+        DG_PATH: ${{ inputs.path }}
+      run: node "$DG_SCRIPT" "$DG_PATH"
+
+    # Runs even when Lint failed: a PR that both drifts and approves its own drift
+    # should show both.
+    - name: Approvals
+      if: ${{ !cancelled() && inputs.check-approvals == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        DG_SCRIPT: ${{ github.action_path }}/scripts/ds-lint.mjs
+        DG_BASE: ${{ inputs.base || github.base_ref }}
+        DG_FAIL: ${{ inputs.fail-on-approvals }}
+      run: |
+        if [ -z "$DG_BASE" ]; then
+          echo "::notice title=Design Guard::Approvals check skipped: not a pull request and no 'base' input given."
+          exit 0
+        fi
+
+        # actions/checkout is shallow by default, which leaves no merge base to
+        # diff against. Fetch the base branch and, if needed, the full history.
+        # (Set fetch-depth: 0 on checkout to skip this.)
+        git fetch --no-tags --quiet origin "+refs/heads/$DG_BASE:refs/remotes/origin/$DG_BASE"
+        if ! git merge-base "origin/$DG_BASE" HEAD >/dev/null 2>&1 \
+          && [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+          git fetch --no-tags --quiet --unshallow origin "+refs/heads/$DG_BASE:refs/remotes/origin/$DG_BASE"
+        fi
+
+        set +e
+        out="$(node "$DG_SCRIPT" --added-markers "origin/$DG_BASE...HEAD")"
+        code=$?
+        set -e
+        echo "$out"
+
+        if [ "$code" -eq 1 ]; then
+          {
+            echo "### Design Guard: approvals need a human"
+            echo
+            echo "This PR changes what counts as approved. Confirm each item was asked for by a person before merging."
+            echo
+            echo '```'
+            echo "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DG_FAIL" = "false" ]; then
+            echo "::warning title=Design Guard::This PR changes what counts as approved. See the job summary."
+            exit 0
+          fi
+          echo "::error title=Design Guard::This PR changes what counts as approved. See the job summary; merge only if a human asked for each item."
+        fi
+        exit "$code"

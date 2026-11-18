@@ -887,3 +887,363 @@ test('serve: a bad --port is an error, not a crash', () => {
   assert.match(out, /--port needs a number/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- --added-markers: config edits that narrow the check ----
+// The config is a second way to make a component stop being flagged: ignore its
+// directory, or drop it from components:. Nothing reported that, so an agent could
+// silence the guard without touching a marker.
+
+function gitRepo(files) {
+  const root = project(files);
+  const git = (...args) =>
+    execFileSync('git', args, {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' },
+    });
+  git('init', '-q', '-b', 'main');
+  git('add', '-A');
+  git('commit', '-qm', 'base');
+  git('checkout', '-qb', 'feat');
+  const commit = (path, body) => {
+    writeFileSync(join(root, path), body);
+    git('add', '-A');
+    git('commit', '-qm', `edit ${path}`);
+  };
+  return { root, commit };
+}
+
+const CONFIG_BASE = 'components: src/components/ui, src/components/app\ntypography-base: true\n';
+
+test('--added-markers reports a directory added to components-ignore', () => {
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE });
+  commit('design-guard.config', CONFIG_BASE + 'components-ignore: src/components/shared\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /config changes that narrow the check/);
+  assert.match(out, /components-ignore: added src\/components\/shared/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports a directory removed from components', () => {
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE });
+  commit('design-guard.config', 'components: src/components/ui\ntypography-base: true\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /components: removed src\/components\/app/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports typography-base switched off, including by deleting the key', () => {
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE });
+  commit('design-guard.config', 'components: src/components/ui, src/components/app\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /typography-base: true -> off/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers sees a narrowing edit in context/STACK.md too', () => {
+  const { root, commit } = gitRepo({ 'context/STACK.md': '# Stack\ncomponents: src/components/ui\n' });
+  commit('context/STACK.md', '# Stack\ncomponents: src/components/ui\ncomponents-ignore: src/components/legacy\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /components-ignore: added src\/components\/legacy/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers stays quiet on config edits that widen the check', () => {
+  const { root, commit } = gitRepo({
+    'design-guard.config': 'components: src/components/ui\ncomponents-ignore: src/components/legacy\ntypography-base: false\n',
+  });
+  // add a directory, stop ignoring one, turn typography on, reorder — all stricter or neutral
+  commit('design-guard.config', 'typography-base: true\ncomponents: src/components/app, src/components/ui   # now two\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 0, out);
+  assert.match(out, /No config changes narrowing the check/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers treats deleting the config as narrowing when it listed more than the default', () => {
+  const { root } = gitRepo({ 'design-guard.config': CONFIG_BASE });
+  rmSync(join(root, 'design-guard.config'));
+  // single-rev range: compares against the working tree, like `git diff main`
+  const { code, out } = run(root, ['--added-markers', 'main']);
+  assert.equal(code, 1);
+  assert.match(out, /components: removed src\/components\/app/);
+  assert.match(out, /typography-base: true -> off/);
+  assert.doesNotMatch(out, /removed src\/components\/ui\b/); // the default still covers it
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports markers and config edits together', () => {
+  const { root, commit } = gitRepo({
+    'design-guard.config': CONFIG_BASE,
+    'src/components/ui/card.tsx': 'export const Card = () => null;\n',
+  });
+  commit('src/components/ui/card.tsx', '// @approved\nexport const Card = () => null;\n');
+  commit('design-guard.config', CONFIG_BASE + 'components-ignore: src/components/shared\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /markers added in main\.\.\.HEAD/);
+  assert.match(out, /card\.tsx/);
+  assert.match(out, /components-ignore: added src\/components\/shared/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---- --added-markers: the exceptions file ----
+// allowed-customization.md used to tell the agent to add its own exceptions. Whatever
+// it lists stops being a finding, so a change to it is approval and gets reported.
+
+const EXCEPTIONS = '# Allowed customization\n\n## Never allowed, anywhere\n\n- `!important`\n';
+
+test('--added-markers reports an exception added to allowed-customization.md, wherever it is installed', () => {
+  const path = '.claude/skills/design-guard/allowed-customization.md';
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE, [path]: EXCEPTIONS });
+  commit(path, EXCEPTIONS + '\n## Exceptions\n\n- `ring-*` on Input\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /exceptions file changed/);
+  assert.match(out, /\.claude\/skills\/design-guard\/allowed-customization\.md  \(\+2 -0 lines\)/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports a rule removed from allowed-customization.md, even a Markdown line starting with --', () => {
+  const body = EXCEPTIONS + '-- spreading props\n';
+  const { root, commit } = gitRepo({ 'allowed-customization.md': body });
+  // removing "-- spreading props" shows in the diff as "--- spreading props", which
+  // looks like a file header; it must still count as a removed line
+  commit('allowed-customization.md', EXCEPTIONS);
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /allowed-customization\.md  \(\+0 -1 lines\)/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports deleting allowed-customization.md', () => {
+  const { root } = gitRepo({ 'allowed-customization.md': EXCEPTIONS });
+  rmSync(join(root, 'allowed-customization.md'));
+  const { code, out } = run(root, ['--added-markers', 'main']);
+  assert.equal(code, 1);
+  assert.match(out, /allowed-customization\.md  \(\+0 -3 lines\)/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers ignores other Markdown and whitespace-only edits to the exceptions file', () => {
+  const { root, commit } = gitRepo({ 'allowed-customization.md': EXCEPTIONS, 'docs/notes.md': 'x\n' });
+  commit('docs/notes.md', 'x\n- `ring-*` is fine\n');
+  commit('allowed-customization.md', EXCEPTIONS + '\n\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 0, out);
+  assert.doesNotMatch(out, /exceptions file changed/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports "unstyled by design" added to an existing marker line', () => {
+  const { root, commit } = gitRepo({
+    'design-guard.config': CONFIG_BASE,
+    'src/components/ui/card.tsx': '// @approved\nexport const Card = () => null;\n',
+  });
+  commit('src/components/ui/card.tsx', '// @approved — unstyled by design\nexport const Card = () => null;\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /markers added in main\.\.\.HEAD/);
+  assert.match(out, /card\.tsx/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---- --added-markers: only real markers count ----
+// It used to report any added line containing "@approved", anywhere in any file, so
+// the linter's own source, its tests and the README all read as approvals. In CI
+// that fails every PR that mentions the word.
+
+test('--added-markers ignores @approved mentioned in code, tests and docs', () => {
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE, 'README.md': '# x\n', 'src/lib.ts': 'x\n' });
+  commit('README.md', '# x\n\nAdd `// @approved` to a component file.\n\n\n\nMore: // @approved\n');
+  commit('src/lib.ts', 'const RE = /@approved/;\nconst s = "@approved";\n' + 'x\n'.repeat(40) + '// @approved\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 0, out);
+  assert.match(out, /No @approved markers added/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers ignores a marker below the 5-line window, and reports one moved into it', () => {
+  const below = 'a\nb\nc\nd\ne\n// @approved\nexport const Card = () => null;\n';
+  const { root, commit } = gitRepo({ 'design-guard.config': CONFIG_BASE, 'src/components/ui/card.tsx': 'export const Card = () => null;\n' });
+  commit('src/components/ui/card.tsx', below);
+  const low = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(low.code, 0, low.out);
+
+  // deleting lines above pulls the existing marker into the window: no marker line
+  // is "added" in the diff, but the component is now approved
+  commit('src/components/ui/card.tsx', below.replace('a\nb\n', ''));
+  const up = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(up.code, 1);
+  assert.match(up.out, /card\.tsx/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers does not re-report a marker that was already there', () => {
+  const { root, commit } = gitRepo({
+    'design-guard.config': CONFIG_BASE,
+    'src/components/ui/card.tsx': '// @approved\nexport const Card = () => null;\n',
+  });
+  commit('src/components/ui/card.tsx', '// @approved\nexport const Card = () => <div />;\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 0, out);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers works from a project in a subdirectory of the repository', () => {
+  const { root, commit } = gitRepo({
+    'apps/web/design-guard.config': 'components: src/components/ui\n',
+    'apps/web/src/components/ui/card.tsx': 'export const Card = () => null;\n',
+  });
+  commit('apps/web/src/components/ui/card.tsx', '// @approved\nexport const Card = () => null;\n');
+  const { code, out } = run(join(root, 'apps/web'), ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /src\/components\/ui\/card\.tsx/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---- --codeowners ----
+// CODEOWNERS lines for every file that decides approval, generated from the config
+// so there is no second list to keep in sync.
+
+test('--codeowners lists every component dir, the config, the exceptions file and CODEOWNERS itself', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui, src/components/app\n',
+    '.claude/skills/design-guard/allowed-customization.md': '# x\n',
+    'src/components/ui/button.tsx': 'export const Button = () => null;\n',
+  });
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  const { code, out } = run(root, ['--codeowners', '@acme/design-system', '@lead']);
+  assert.equal(code, 0, out);
+  const o = '@acme/design-system @lead';
+  assert.match(out, new RegExp(`^/src/components/ui/ ${o}$`, 'm'));
+  assert.match(out, new RegExp(`^/src/components/app/ ${o}$`, 'm'));
+  assert.match(out, new RegExp(`^/design-guard\\.config ${o}$`, 'm'));
+  assert.match(out, new RegExp(`^/\\.claude/skills/design-guard/allowed-customization\\.md ${o}$`, 'm'));
+  assert.match(out, new RegExp(`^/\\.github/CODEOWNERS ${o}$`, 'm'));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--codeowners owns design-guard.config even when the keys live in context/STACK.md', () => {
+  const root = project({ 'context/STACK.md': 'components: src/ui\n', 'CODEOWNERS': '* @x\n' });
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  const { code, out } = run(root, ['--codeowners', '@ds']);
+  assert.equal(code, 0, out);
+  assert.match(out, /^\/src\/ui\/ @ds$/m);
+  assert.match(out, /^\/design-guard\.config @ds$/m); // creating it would override STACK.md
+  assert.match(out, /^\/context\/STACK\.md @ds$/m);
+  assert.match(out, /^\/CODEOWNERS @ds$/m); // the existing file, not .github/
+  assert.match(out, /no allowed-customization\.md found/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--codeowners writes repository-root paths for a project in a subdirectory', () => {
+  const root = project({
+    'apps/web/design-guard.config': 'components: src/components/ui\n',
+    '.claude/skills/design-guard/allowed-customization.md': '# x\n',
+  });
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  const { code, out } = run(join(root, 'apps/web'), ['--codeowners', '@ds']);
+  assert.equal(code, 0, out);
+  assert.match(out, /^\/apps\/web\/src\/components\/ui\/ @ds$/m);
+  assert.match(out, /^\/apps\/web\/design-guard\.config @ds$/m);
+  assert.match(out, /^\/\.claude\/skills\/design-guard\/allowed-customization\.md @ds$/m); // outside the project, still found
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--codeowners refuses a missing or malformed owner', () => {
+  const root = project({ 'design-guard.config': 'components: src/ui\n' });
+  const none = run(root, ['--codeowners']);
+  assert.equal(none.code, 2);
+  assert.match(none.out, /needs at least one owner/);
+  const bad = run(root, ['--codeowners', 'acme']);
+  assert.equal(bad.code, 2);
+  assert.match(bad.out, /not a GitHub owner: acme/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports a change to CODEOWNERS', () => {
+  const { root, commit } = gitRepo({ '.github/CODEOWNERS': '/src/components/ui/ @ds\n' });
+  commit('.github/CODEOWNERS', '# owners\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /CODEOWNERS changed/);
+  assert.match(out, /\.github\/CODEOWNERS  \(\+1 -1 lines\)/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---- props spread onto a design-system component ----
+// allowed-customization.md forbade it, the linter never checked: <Button {...props}>
+// forwards className and style, so a wrapper lets any caller restyle Button unseen.
+
+const SPREAD_BASE = {
+  'design-guard.config': 'components: src/components/ui\n',
+  'src/components/ui/button.tsx': '// @approved\nexport const Button = (p: any) => null;\n',
+  'src/components/ui/input.tsx': '// @approved\nexport const Input = (p: any) => null;\n',
+};
+
+test('flags a spread on a design-system component in app code and in a wrapper', () => {
+  const root = project({
+    ...SPREAD_BASE,
+    'src/routes/page.tsx': 'import { Button } from "@/components/ui/button";\nexport const P = (props: any) => (\n  <Button\n    variant="primary"\n    {...props}\n  >Go</Button>\n);\n',
+    // the bypass: a wrapper outside the component directories that forwards everything
+    'src/components/shared/my-button.tsx': 'import { Button as B } from "@/components/ui/button";\nexport const MyButton = ({ children, ...rest }: any) => <B {...rest}>{children}</B>;\n',
+  });
+  const { code, out } = run(root, ['src']);
+  assert.equal(code, 1);
+  assert.match(out, /props spread onto a design-system component/);
+  assert.match(out, /src\/routes\/page\.tsx:5: <Button> \{\.\.\.props\}/); // the spread's own line
+  assert.match(out, /src\/components\/shared\/my-button\.tsx:2: <B> \{\.\.\.rest\}/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('a spread inside an expression prop is not a spread on the tag', () => {
+  const root = project({
+    ...SPREAD_BASE,
+    'src/routes/page.tsx': [
+      'import { Button } from "@/components/ui/button";',
+      'export const P = ({ args }: any) => <Button onClick={() => go(...args)} data={{ ...base, x: 1 }}>Go</Button>;',
+      // a spread on a plain element or a third-party component isn't the design system's concern
+      'export const Q = (p: any) => <><div {...p} /><Thing {...p} /></>;',
+    ].join('\n'),
+  });
+  const { out } = run(root, ['src/routes']);
+  assert.doesNotMatch(out, /props spread onto a design-system component/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('form wiring is exempt: {...field} and spreads of a call', () => {
+  const root = project({
+    ...SPREAD_BASE,
+    'src/routes/form.tsx': [
+      'import { Input } from "@/components/ui/input";',
+      'export const F = ({ field, form, register, getInputProps }: any) => (<>',
+      '  <Input {...field} />',
+      '  <Input {...register("email", { required: true })} />',
+      '  <Input {...form.register("name")} />',
+      '  <Input {...getInputProps()} />',
+      '  <Input {...fieldProps} />',
+      '</>);',
+    ].join('\n'),
+  });
+  const { code, out } = run(root, ['src/routes']);
+  assert.equal(code, 1);
+  assert.match(out, /form\.tsx:7: <Input> \{\.\.\.fieldProps\}/); // a near-miss name is not exempt
+  const hits = out.split('\n').filter((l) => l.startsWith('src/routes/form.tsx'));
+  assert.deepEqual(hits, ['src/routes/form.tsx:7: <Input> {...fieldProps}']);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('a spread inside a component directory is composition, not a finding', () => {
+  const root = project({
+    ...SPREAD_BASE,
+    'src/components/ui/icon-button.tsx': '// @approved\nimport { Button } from "./button";\nexport const IconButton = (props: any) => <Button size="icon" {...props} />;\n',
+  });
+  const { out } = run(root, ['src']);
+  assert.doesNotMatch(out, /props spread onto a design-system component/);
+  rmSync(root, { recursive: true, force: true });
+});

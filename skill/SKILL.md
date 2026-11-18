@@ -55,6 +55,15 @@ node scripts/ds-lint.mjs --added-markers main...HEAD
 
 A marker in the diff that you never mentioned is itself the finding.
 
+### The config is approval too
+
+`design-guard.config` decides what the guard looks at, so editing it can do what a marker does: put `src/components/shared` under `components-ignore:` and everything in it stops being flagged, approved or not. The same rule applies:
+
+- **Edit the config only when the human asks for that edit in that moment.** Never to make a finding go away, never because a directory "isn't really design-system components", never while you're in the file for something else. If you think a directory should be listed or ignored, say so and let them decide.
+- **Every config change in the diff is reported**, including the ones the human asked for. `--added-markers` lists the ones that narrow the check (a directory added to `components-ignore:`, one dropped from `components:`, `typography-base` switched off) alongside the markers, and exits 1 for either. A narrowing change you never mentioned is itself the finding.
+- **`allowed-customization.md` is the same.** Whatever it allows stops being a finding, so only the human adds an exception there: park the case and propose the line, don't write it. `--added-markers` reports any change to that file, wherever it's installed.
+- **So is CODEOWNERS** when the project uses it. The entries covering component directories, the config or `allowed-customization.md` are what make a design-system owner review approvals. Never edit or remove them unless the human asks, and report any change to the CODEOWNERS file (`--added-markers` lists those too). `--codeowners <owner>` prints the lines for the human to paste; it doesn't write the file.
+
 ## Config — optional, sensible defaults if you skip it
 
 `ds-lint.mjs` reads three optional keys, one per line, from `design-guard.config` in the project root (it falls back to `context/STACK.md` if that's where the project keeps its facts). A missing file just means defaults:
@@ -77,7 +86,7 @@ Never treat an omission as deliberate. A deliberate exclusion is written down in
 | --- | --- | --- |
 | 1 | Raw HTML for core UI | `<button>`, `<input>`, `<select>`, `<textarea>`, hand-rolled card / modal / dropdown / tab `<div>` structures |
 | 2 | Off-system component | local component duplicating an `@approved` one; component in a components directory with no `@approved` marker |
-| 3 | Appearance override on a design-system component | `<Card className="bg-muted">`, `border-*`, `ring-*`, `shadow-*`, `rounded-*`, `font-*`, `opacity-*` on an approved component, raw hex/`rgb()`, non-token utilities like `bg-white` `text-black` `text-[#333]`, `!important` |
+| 3 | Appearance override on a design-system component | `<Card className="bg-muted">`, `border-*`, `ring-*`, `shadow-*`, `rounded-*`, `font-*`, `opacity-*` on an approved component, raw hex/`rgb()`, non-token utilities like `bg-white` `text-black` `text-[#333]`, `!important`, `<Button {...props}>` (a spread forwards `className` and `style` unchecked; form wiring like `{...field}` / `{...register('x')}` is fine) |
 | 4 | Typography utilities on semantic text elements | `<h1 className="text-2xl font-semibold">` — the base layer already sets size, weight, colour, tracking and leading on `<h1>`–`<h6>`, `<p>`, `<a>`, `<strong>`, `<blockquote>`, `<li>`, `<label>`, `<legend>` |
 
 Plain layout wrappers (`<div>`, `<section>`, `<span>`, `<ul>`) are fine. The rule targets interactive controls and visual surfaces, not structure.

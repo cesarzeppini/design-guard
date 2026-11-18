@@ -3,7 +3,9 @@
 //
 // Usage:
 //   ds-lint.mjs <file-or-dir> [...]          lint (defaults to src/)
-//   ds-lint.mjs --added-markers <git-range>  audit @approved markers added in a range
+//   ds-lint.mjs --added-markers <git-range>  audit @approved markers, config edits that narrow the check,
+//                                            and changes to allowed-customization.md or CODEOWNERS
+//   ds-lint.mjs --codeowners <owner...>      CODEOWNERS lines for everything that decides approval
 //   ds-lint.mjs --registry [root]            inventory for the report's registry section
 //   ds-lint.mjs --approve <file...>          add the @approved marker (a human's act — see SKILL.md)
 //   ds-lint.mjs --unapprove <file...>        remove it
@@ -11,7 +13,8 @@
 //   ds-lint.mjs --scan [root]                every component as JSON: status, usage, props, variants
 //
 // Exit 1 when any hit is found, 0 when clean. --registry always exits 0 (inventory,
-// not a finding). --added-markers exits 1 when markers were added.
+// not a finding). --added-markers exits 1 when markers were added, the config narrowed, or
+// allowed-customization.md or CODEOWNERS changed.
 //
 // Node rather than shell, deliberately. The shell version accumulated four bugs of
 // kinds this file cannot have: `ls a b` failing when only one glob missed, a sed
@@ -48,17 +51,32 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'co
 
 const CONFIG_FILES = ['design-guard.config', 'context/STACK.md'];
 
-function stackKey(name) {
+// The skill's list of allowed customization. Wherever it is installed, a change
+// to it is a change to what counts as approved, so --added-markers reports it.
+const EXCEPTIONS_FILE = 'allowed-customization.md';
+
+// The same lookup over any source of file text, so --added-markers can read the
+// config as it was at a past revision. `read(file)` returns the text or null.
+function configKey(name, read) {
   for (const file of CONFIG_FILES) {
-    try {
-      const text = readFileSync(file, 'utf8');
-      const m = text.match(new RegExp(`^${name}:[ \\t]*(.*)$`, 'm'));
-      if (m) return m[1].replace(/\s+#.*$/, '').trim();
-    } catch {
-      // file absent — try the next
-    }
+    const text = read(file);
+    if (text == null) continue; // file absent — try the next
+    const m = text.match(new RegExp(`^${name}:[ \\t]*(.*)$`, 'm'));
+    if (m) return m[1].replace(/\s+#.*$/, '').trim();
   }
   return '';
+}
+
+function readWorkingFile(file) {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function stackKey(name) {
+  return configKey(name, readWorkingFile);
 }
 
 function dirList(raw, fallback = '') {
@@ -168,15 +186,42 @@ function addedMarkers(range) {
     return 2;
   }
 
-  const found = new Set();
-  let file = null;
+  const exceptions = new Map(); // allowed-customization.md path -> { added, removed }
+  const owners = new Map(); // CODEOWNERS path -> { added, removed }
+  let file = null; // path on the new side; null when the file was deleted
+  let oldFile = null;
+  let inHeader = false; // ---/+++ are file headers only between `diff --git` and the first @@
   for (const line of diff.split('\n')) {
-    if (line.startsWith('+++ ')) {
+    if (line.startsWith('diff --git ')) {
+      inHeader = true;
+    } else if (line.startsWith('@@')) {
+      inHeader = false;
+    } else if (inHeader && line.startsWith('--- ')) {
+      const p = line.slice(4).trim();
+      oldFile = p === '/dev/null' ? null : p.replace(/^a\//, '');
+    } else if (inHeader && line.startsWith('+++ ')) {
       const p = line.slice(4).trim();
       file = p === '/dev/null' ? null : p.replace(/^b\//, '');
-    } else if (file && line.startsWith('+') && !line.startsWith('+++') && line.includes('@approved')) {
-      found.add(file);
+    } else if (!inHeader && (line.startsWith('+') || line.startsWith('-'))) {
+      const added = line.startsWith('+');
+      // The exceptions file is policy: any line in or out changes what counts
+      // as allowed, so every change is reported, wording included.
+      const policy = file ?? oldFile;
+      const kind = policy && line.slice(1).trim() !== '' ? basename(policy) : null;
+      const bucket = kind === EXCEPTIONS_FILE ? exceptions : kind === 'CODEOWNERS' ? owners : null;
+      if (bucket) {
+        const n = bucket.get(policy) ?? { added: 0, removed: 0 };
+        n[added ? 'added' : 'removed'] += 1;
+        bucket.set(policy, n);
+      }
     }
+  }
+
+  const found = markersAdded(range);
+  const weakened = weakeningConfigChanges(range);
+  if (found === null || weakened === null) {
+    console.error(`ds-lint: cannot read both ends of "${range}"`);
+    return 2;
   }
 
   if (found.size > 0) {
@@ -185,10 +230,154 @@ function addedMarkers(range) {
     console.log('');
     console.log('   Report each of these in the final report as a Needs-you item, naming who');
     console.log('   asked for it — including when a human did ask.');
-    return 1;
+  } else {
+    console.log(`No @approved markers added in ${range}`);
   }
-  console.log(`No @approved markers added in ${range}`);
-  return 0;
+
+  if (weakened.length > 0) {
+    if (found.size > 0) console.log('');
+    console.log(`== config changes that narrow the check in ${range}`);
+    for (const w of weakened) console.log(`  ${w}`);
+    console.log('');
+    console.log('   Each of these stops the guard looking at something. Like a marker, it is');
+    console.log("   a human's decision: report it as a Needs-you item, naming who asked for it.");
+  } else {
+    console.log(`No config changes narrowing the check in ${range}`);
+  }
+
+  if (exceptions.size > 0) {
+    console.log('');
+    console.log(`== exceptions file changed in ${range}`);
+    for (const [f, n] of [...exceptions].sort()) {
+      console.log(`  ${f}  (+${n.added} -${n.removed} lines)`);
+    }
+    console.log('');
+    console.log('   This file says what customization is allowed. Only a human adds an');
+    console.log('   exception: report it as a Needs-you item, naming who asked for it.');
+  }
+
+  if (owners.size > 0) {
+    console.log('');
+    console.log(`== CODEOWNERS changed in ${range}`);
+    for (const [f, n] of [...owners].sort()) console.log(`  ${f}  (+${n.added} -${n.removed} lines)`);
+    console.log('');
+    console.log('   CODEOWNERS decides who reviews approvals. Report the change as a');
+    console.log('   Needs-you item, naming who asked for it.');
+  }
+
+  return found.size > 0 || weakened.length > 0 || exceptions.size > 0 || owners.size > 0 ? 1 : 0;
+}
+
+// A marker counts only where it confers approval: a marker comment within the
+// first MARKER_WINDOW lines. So a file is reported when, comparing the two ends of
+// the range, its marker lines in that window appeared or changed (a new marker, a
+// marker moved up into the window, or "unstyled by design" written onto one).
+// Code, tests and docs that merely mention @approved further down are not markers.
+function markerLines(text) {
+  if (text == null) return [];
+  return text
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .slice(0, MARKER_WINDOW)
+    .filter((l) => MARKER_RE.test(l))
+    .map((l) => l.trim());
+}
+
+function markersAdded(range) {
+  let ends;
+  let names;
+  try {
+    ends = rangeEnds(range);
+    // --relative: paths relative to (and limited to) the current directory, so a
+    // project in a subdirectory of the repository is read correctly.
+    names = execFileSync('git', ['diff', '--name-only', '--relative', '--diff-filter=d', range], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .split('\n')
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
+  const before = readAtRev(ends.base);
+  const after = ends.head === null ? readWorkingFile : readAtRev(ends.head);
+  const found = new Set();
+  for (const f of names) {
+    const now = markerLines(after(f));
+    if (now.length === 0) continue;
+    const was = new Set(markerLines(before(f)));
+    if (now.some((l) => !was.has(l))) found.add(f);
+  }
+  return found;
+}
+
+// Resolve a diff range to the two states it compares, the way `git diff` does:
+// A...B  -> merge-base(A, B) vs B     A..B -> A vs B
+// A      -> A vs the working tree     (B defaults to HEAD)
+// Returns { base, head } where head === null means the working tree.
+function rangeEnds(range) {
+  const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  if (range.includes('...')) {
+    const [a, b] = range.split('...');
+    const head = b || 'HEAD';
+    return { base: git('merge-base', a || 'HEAD', head), head };
+  }
+  if (range.includes('..')) {
+    const [a, b] = range.split('..');
+    return { base: a || 'HEAD', head: b || 'HEAD' };
+  }
+  return { base: range, head: null };
+}
+
+function readAtRev(rev) {
+  return (file) => {
+    try {
+      // `./` makes the path relative to the current directory, so this works
+      // when the project is a subdirectory of the repository.
+      return execFileSync('git', ['show', `${rev}:./${file}`], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        maxBuffer: 16 * 1024 * 1024,
+      });
+    } catch {
+      return null; // file absent at that revision
+    }
+  };
+}
+
+function effectiveConfig(read) {
+  return {
+    components: dirList(configKey('components', read), 'src/components/ui'),
+    ignore: dirList(configKey('components-ignore', read)),
+    typographyBase: /^true$/i.test(configKey('typography-base', read)),
+  };
+}
+
+// Config edits that make the guard look at less: an ignored directory added, a
+// component directory dropped, or the type-scale check switched off. Edits that
+// widen the check are not reported. null if the range can't be resolved.
+function weakeningConfigChanges(range) {
+  let ends;
+  try {
+    ends = rangeEnds(range);
+  } catch {
+    return null;
+  }
+  const before = effectiveConfig(readAtRev(ends.base));
+  const after = effectiveConfig(ends.head === null ? readWorkingFile : readAtRev(ends.head));
+
+  const out = [];
+  for (const d of after.ignore) {
+    if (!before.ignore.includes(d)) out.push(`components-ignore: added ${d} — no longer scanned`);
+  }
+  for (const d of before.components) {
+    if (!after.components.includes(d)) out.push(`components: removed ${d} — no longer scanned`);
+  }
+  if (before.typographyBase && !after.typographyBase) {
+    out.push('typography-base: true -> off — typography check (violation 4) disabled');
+  }
+  return out;
 }
 
 // ---- component scan ----
@@ -652,6 +841,66 @@ function appearanceHits(files) {
   return found;
 }
 
+// ---- props spread onto a design-system component ----
+//
+// `<Button {...props}>` passes whatever the caller sends, className and style
+// included, so a wrapper that forwards props lets any call site restyle the
+// component where no check can see it. Only a spread written as an attribute of the
+// tag counts; `onClick={() => f(...args)}` and `style={{...base}}` are inside an
+// expression, not on the tag. Component directories aren't linted at all: composing
+// one design-system component from another is how the system is built, and those
+// files are guarded by approval.
+//
+// Exempt, because they are how forms are wired and carry only value, handlers,
+// name and ref: a spread of a call (`{...register('email')}`, `{...getInputProps()}`)
+// and react-hook-form's `{...field}`.
+const SPREAD_CALL_RE = /^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\s*\([\s\S]*\)$/;
+const SPREAD_EXEMPT_NAMES = new Set(['field']);
+
+// Each `{...expr}` at the top level of a tag body: [offset, expr].
+function tagSpreads(body) {
+  const out = [];
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        const inner = body.slice(start + 1, i).trim();
+        if (inner.startsWith('...')) out.push([start, inner.slice(3).trim()]);
+        start = -1;
+      }
+    }
+  }
+  return out;
+}
+
+function spreadHits(files) {
+  const found = [];
+  for (const f of files) {
+    const tags = systemTagsIn(f);
+    if (tags.size === 0) continue;
+    const text = readLines(f).join('\n');
+    OPEN_TAG_RE.lastIndex = 0;
+    let m;
+    while ((m = OPEN_TAG_RE.exec(text))) {
+      const tag = m[1];
+      if (!tags.has(tag)) continue;
+      const bodyStart = OPEN_TAG_RE.lastIndex;
+      for (const [offset, expr] of tagSpreads(tagBodyAt(text, bodyStart))) {
+        if (SPREAD_EXEMPT_NAMES.has(expr) || SPREAD_CALL_RE.test(expr)) continue;
+        const line = text.slice(0, bodyStart + offset).split('\n').length;
+        found.push(`${f}:${line}: <${tag}> {...${expr.replace(/\s+/g, ' ')}}`);
+      }
+    }
+  }
+  return found;
+}
+
 function unlistedComponentDirs() {
   // Component directories the project has but `components:` doesn't list. Without
   // this, an incomplete key narrows the check silently: an unlisted directory is
@@ -748,6 +997,18 @@ function lint(targets) {
     }
   }
 
+  const spreads = spreadHits(files);
+  if (spreads.length) {
+    console.log('== props spread onto a design-system component');
+    spreads.forEach((l) => console.log(l));
+    console.log('');
+    console.log('   A spread passes className and style through unchecked, so any caller can');
+    console.log('   restyle the component. Pass the props the component needs by name. Form');
+    console.log("   wiring ({...field}, {...register('x')}) is allowed.");
+    console.log('');
+    hits = 1;
+  }
+
   const appearance = appearanceHits(files);
   if (appearance.length) {
     console.log('== appearance override on a design-system component');
@@ -813,12 +1074,77 @@ function lint(targets) {
   return hits;
 }
 
+// ---- mode: --codeowners ----
+// Prints CODEOWNERS lines for every file that decides what counts as approved, so a
+// change to any of them needs a design-system owner's review on GitHub. Generated
+// from the config each time, so there is no second list to keep in sync. Prints
+// only; the human pastes it in.
+
+const OWNER_RE = /^(@[A-Za-z0-9][\w.-]*(\/[\w.-]+)?|[^@\s]+@[^@\s]+\.[^@\s]+)$/;
+const CODEOWNERS_LOCATIONS = ['.github/CODEOWNERS', 'CODEOWNERS', 'docs/CODEOWNERS'];
+
+function gitOut(args, cwd) {
+  try {
+    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return null;
+  }
+}
+
+// CODEOWNERS paths: anchored at the repository root, spaces escaped.
+const ownersPath = (p, dir = false) => `/${p.replace(/ /g, '\\ ')}${dir ? '/' : ''}`;
+
+function codeownersMode(owners) {
+  if (owners.length === 0) {
+    console.error('ds-lint: --codeowners needs at least one owner, e.g. --codeowners @acme/design-system');
+    return 2;
+  }
+  const bad = owners.filter((o) => !OWNER_RE.test(o));
+  if (bad.length > 0) {
+    console.error(`ds-lint: not a GitHub owner: ${bad.join(' ')} (use @user, @org/team or an email)`);
+    return 2;
+  }
+
+  // Paths in CODEOWNERS are relative to the repository root, the project may be a
+  // subdirectory of it.
+  const top = gitOut(['rev-parse', '--show-toplevel']);
+  const prefix = top === null ? '' : gitOut(['rev-parse', '--show-prefix']) ?? '';
+  const root = top ?? '.';
+  const who = owners.join(' ');
+  const lines = [];
+
+  for (const d of COMPONENT_DIRS) lines.push(`${ownersPath(prefix + d, true)} ${who}`);
+
+  // design-guard.config always, even before it exists: it takes precedence, so
+  // creating one would override keys kept in context/STACK.md. STACK.md when present.
+  const configs = CONFIG_FILES.filter((f, i) => i === 0 || readWorkingFile(f) !== null);
+  for (const f of configs) lines.push(`${ownersPath(prefix + f)} ${who}`);
+
+  const listed = gitOut(['ls-files', '--cached', '--others', '--exclude-standard', '--full-name'], root);
+  const policies = (listed === null ? [...walk('.')].map(norm) : listed.split('\n'))
+    .filter((f) => basename(f) === EXCEPTIONS_FILE)
+    .sort();
+  for (const f of policies) lines.push(`${ownersPath(f)} ${who}`);
+
+  // The CODEOWNERS file itself, or anyone could take the entries above out.
+  const existing = CODEOWNERS_LOCATIONS.find((f) => readWorkingFile(join(root, f)) !== null);
+  lines.push(`${ownersPath(existing ?? CODEOWNERS_LOCATIONS[0])} ${who}`);
+
+  console.log('# Design Guard: what counts as approved. Changes here need a design-system owner.');
+  console.log('# Generated by ds-lint --codeowners; re-run it when design-guard.config changes.');
+  if (policies.length === 0) console.log(`# (no ${EXCEPTIONS_FILE} found; re-run after installing the skill)`);
+  for (const l of lines) console.log(l);
+  return 0;
+}
+
 // ---- dispatch ----
 
 const argv = process.argv.slice(2);
 
 if (argv[0] === '--added-markers') {
   process.exit(addedMarkers(argv[1] || 'main...HEAD'));
+} else if (argv[0] === '--codeowners') {
+  process.exit(codeownersMode(argv.slice(1)));
 } else if (argv[0] === '--approve' || argv[0] === '--unapprove') {
   process.exit(approveMode(argv[0] === '--approve', argv.slice(1)));
 } else if (argv[0] === '--serve') {
