@@ -175,7 +175,7 @@ components-ignore: src/components/icons
 typography-base: true                # does your CSS base layer style h1–h6, p, a…?
 ```
 
-- `components` defaults to `src/components/ui`. Imports are matched by directory tail, so `@/`, `~/` and relative paths all resolve.
+- `components` defaults to `src/components/ui`. Imports are matched by directory tail, so `@/`, `~/` and relative paths all resolve. Relative paths are also resolved against the importing file, so `../ui/button` from a sibling folder counts.
 - Component directories that exist but are neither listed nor ignored are reported — an unscanned directory would otherwise pass silently.
 - `typography-base` gates check 4. If absent, the guard looks at your CSS and tells you which way it should be set.
 
@@ -210,7 +210,7 @@ The first version was a shell script and shipped four bugs of kinds only shell h
 - A design system that lives in a different repo isn't seen by the guard — it only checks components in your configured local directories.
 - The page's stats don't yet count appearance overrides, only raw HTML elements.
 - A literal `>` inside a plain string prop (`title="a > b"`) can end the tag scan early.
-- It checks what's written, not what renders. It won't catch an override built from a dynamic `className` expression.
+- It checks what's written, not what renders. Classes built in code are read where they can be resolved in the file: `cn()` / `clsx()` arguments, both sides of `&&` and `? :`, template literals and same-file string constants. A class that comes from a prop, an import or a function's return value isn't seen.
 
 ## Origin
 

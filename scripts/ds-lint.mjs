@@ -35,9 +35,10 @@ import {
   norm,
   tailOf,
   componentKey,
-  importMatchers,
   isMarkedText,
   scanProject,
+  resolveImportKey,
+  IMPORT_FROM_RE,
 } from './scan-core.mjs';
 
 
@@ -94,7 +95,6 @@ const TYPOGRAPHY_BASE_RAW = stackKey('typography-base');
 const TYPOGRAPHY_BASE = /^true$/i.test(TYPOGRAPHY_BASE_RAW);
 const TYPOGRAPHY_BASE_DECLARED = /^(true|false)$/i.test(TYPOGRAPHY_BASE_RAW);
 
-const { IMPORT_RE, KEY_RE } = importMatchers(COMPONENT_DIRS);
 
 // ---- filesystem ----
 
@@ -157,17 +157,15 @@ const isMarked = (file) => isMarkedText(readLines(file).join('\n'));
 // The imported component key, taken from the LINE CONTENT only. A component's own
 // path contains the same directory tail, so matching against the path would return
 // the file itself instead of what it imports.
-const importKey = (content) => (KEY_RE ? (content.match(KEY_RE) || [null])[0] : null);
 
 function* importsIn(files) {
-  if (!IMPORT_RE) return;
+  if (COMPONENT_DIRS.length === 0) return;
   for (const file of files) {
     const lines = readLines(file);
     for (let i = 0; i < lines.length; i++) {
-      if (IMPORT_RE.test(lines[i])) {
-        const key = importKey(lines[i]);
-        if (key) yield { file, line: i + 1, content: lines[i], key };
-      }
+      const spec = lines[i].match(IMPORT_FROM_RE);
+      const key = spec && resolveImportKey(file, spec[1], COMPONENT_DIRS);
+      if (key) yield { file, line: i + 1, content: lines[i], key };
     }
   }
 }
@@ -686,7 +684,6 @@ const PATTERNS = [
 // Gated on `typography-base:` in design-guard.config (or context/STACK.md): on a project whose base layer styles
 // nothing, the utilities ARE the styling and this would fire on every heading.
 const TYPOGRAPHIC_ELEMENTS = 'h1|h2|h3|h4|h5|h6|p|a|strong|blockquote|li|label|legend';
-const SEMANTIC_TAG_RE = new RegExp(`<(${TYPOGRAPHIC_ELEMENTS})\\s[^>]*className="([^"]*)"`, 'g');
 
 const TEXT_SIZES = new Set(['xs', 'sm', 'base', 'lg', 'xl', '2xl', '3xl', '4xl', '5xl', '6xl', '7xl', '8xl', '9xl']);
 const FONT_WEIGHTS = new Set(['thin', 'extralight', 'light', 'normal', 'medium', 'semibold', 'bold', 'extrabold', 'black']);
@@ -728,24 +725,124 @@ function detectBaseLayer() {
   return null;
 }
 
+// ---- class strings, however className is written ----
+//
+// `className="…"` is the easy case. In a shadcn codebase most classes are built:
+// `cn("rounded-xl", active && "bg-primary")`, `` `shadow-lg ${x}` ``, or a
+// `const cls = "bg-muted"` used as `className={cls}`. Every string literal inside
+// the expression is a candidate class list (both sides of a ternary, both sides of
+// &&, cn/clsx arguments, object keys), plus the static text of template literals
+// and same-file string constants the expression names. Anything else (props,
+// imports, function results) can't be resolved and contributes nothing.
+
+// String literals in an expression, with template-literal static text and the
+// literals inside each ${…}.
+function literalsIn(expr) {
+  const out = [];
+  for (let i = 0; i < expr.length; i++) {
+    const c = expr[i];
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      let buf = '';
+      for (; j < expr.length && expr[j] !== c; j++) {
+        if (expr[j] === '\\') j++;
+        else buf += expr[j];
+      }
+      out.push(buf);
+      i = j;
+    } else if (c === '`') {
+      let j = i + 1;
+      let buf = '';
+      for (; j < expr.length && expr[j] !== '`'; j++) {
+        if (expr[j] === '\\') {
+          j++;
+        } else if (expr[j] === '$' && expr[j + 1] === '{') {
+          let depth = 1;
+          let k = j + 2;
+          for (; k < expr.length && depth > 0; k++) {
+            if (expr[k] === '{') depth++;
+            else if (expr[k] === '}') depth--;
+          }
+          out.push(...literalsIn(expr.slice(j + 2, k - 1)));
+          buf += ' ';
+          j = k - 1;
+        } else {
+          buf += expr[j];
+        }
+      }
+      out.push(buf);
+      i = j;
+    }
+  }
+  return out;
+}
+
+// `const NAME = "…"` / '…' / `…` in the file: name -> literals.
+function fileConstants(text) {
+  const out = new Map();
+  for (const m of text.matchAll(/\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::\s*string\s*)?=\s*(["'`])/g)) {
+    const start = m.index + m[0].length - 1;
+    const lits = literalsIn(text.slice(start, start + 2000));
+    if (lits.length) out.set(m[1], [lits[0]]);
+  }
+  return out;
+}
+
+// Class tokens from a tag body's own className attribute (not one on an element
+// nested inside an expression prop).
+function classTokensOf(body, consts) {
+  let depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === '{') depth++;
+    else if (c === '}') depth--;
+    if (depth !== 0 || !body.startsWith('className=', i) || /[\w-]/.test(body[i - 1] || '')) continue;
+    let j = i + 'className='.length;
+    const q = body[j];
+    let parts = [];
+    if (q === '"' || q === "'") {
+      parts = [body.slice(j + 1, body.indexOf(q, j + 1))];
+    } else if (q === '{') {
+      let d = 0;
+      let k = j;
+      for (; k < body.length; k++) {
+        if (body[k] === '{') d++;
+        else if (body[k] === '}' && --d === 0) break;
+      }
+      const expr = body.slice(j + 1, k);
+      parts = literalsIn(expr);
+      const bare = expr.replace(/(["'`])(?:\\.|(?!\1)[^\\])*\1/g, ' ');
+      for (const id of bare.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)(?![\w$]*\s*[(:])/g)) {
+        if (consts.has(id[1])) parts.push(...consts.get(id[1]));
+      }
+    }
+    return [...new Set(parts.join(' ').split(/\s+/).filter(Boolean))];
+  }
+  return [];
+}
+
+const SEMANTIC_OPEN_RE = new RegExp(`<(${TYPOGRAPHIC_ELEMENTS})(?![\\w-])`, 'g');
+
 function semanticTypographyHits(files) {
   const found = [];
   for (const f of files) {
     const lines = readLines(f);
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+    const text = lines.join('\n');
+    const consts = fileConstants(text);
+    SEMANTIC_OPEN_RE.lastIndex = 0;
+    let m;
+    while ((m = SEMANTIC_OPEN_RE.exec(text))) {
+      const tag = m[1];
+      const lineNo = text.slice(0, m.index).split('\n').length;
       // A <label> wrapping a checkbox or radio is body copy, not a field title —
       // a text colour on it is legitimate. Same-line heuristic; a label split
       // across lines is not detected, and that is the accepted limit.
-      const inlineControl = /type="(checkbox|radio)"/.test(line);
-      for (const m of line.matchAll(SEMANTIC_TAG_RE)) {
-        const [, tag, classNames] = m;
-        for (const cls of classNames.split(/\s+/).filter(Boolean)) {
-          const kind = typographyViolation(cls);
-          if (!kind) continue;
-          if (kind === 'text color' && tag === 'label' && inlineControl) continue;
-          found.push(`${f}:${i + 1}: <${tag}> ${cls} (${kind}) — the base layer already sets this`);
-        }
+      const inlineControl = /type="(checkbox|radio)"/.test(lines[lineNo - 1]);
+      for (const cls of classTokensOf(tagBodyAt(text, SEMANTIC_OPEN_RE.lastIndex), consts)) {
+        const kind = typographyViolation(cls);
+        if (!kind) continue;
+        if (kind === 'text color' && tag === 'label' && inlineControl) continue;
+        found.push(`${f}:${lineNo}: <${tag}> ${cls} (${kind}) — the base layer already sets this`);
       }
     }
   }
@@ -764,10 +861,9 @@ function semanticTypographyHits(files) {
 // and flagging it would fire on every third-party element in the tree.
 function systemTagsIn(file) {
   const tags = new Set();
-  if (!IMPORT_RE) return tags;
   const text = readLines(file).join('\n');
   for (const m of text.matchAll(/import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']/g)) {
-    if (!KEY_RE || !KEY_RE.test(m[2])) continue;
+    if (!resolveImportKey(file, m[2], COMPONENT_DIRS)) continue;
     for (const spec of m[1].split(',')) {
       const name = (spec.split(/\s+as\s+/).pop() || '').trim();
       if (/^[A-Z]/.test(name)) tags.add(name);
@@ -823,16 +919,16 @@ function appearanceHits(files) {
     const tags = systemTagsIn(f);
     if (tags.size === 0) continue;
     const text = readLines(f).join('\n');
+    const consts = fileConstants(text);
     OPEN_TAG_RE.lastIndex = 0;
     let m;
     while ((m = OPEN_TAG_RE.exec(text))) {
       const tag = m[1];
       if (!tags.has(tag)) continue;
-      const body = tagBodyAt(text, OPEN_TAG_RE.lastIndex);
-      const clsMatch = body.match(/className="([^"]*)"/);
-      if (!clsMatch) continue;
+      const classes = classTokensOf(tagBodyAt(text, OPEN_TAG_RE.lastIndex), consts);
+      if (classes.length === 0) continue;
       const line = text.slice(0, m.index).split('\n').length;
-      for (const cls of clsMatch[1].split(/\s+/).filter(Boolean)) {
+      for (const cls of classes) {
         const kind = appearanceViolation(cls);
         if (kind) found.push(`${f}:${line}: <${tag}> ${cls} (${kind})`);
       }
@@ -931,10 +1027,9 @@ function declaredVariants() {
 // Local tag name -> component key, for imports from a configured component directory.
 function systemImportsIn(file) {
   const tags = new Map();
-  if (!KEY_RE) return tags;
   const text = readLines(file).join('\n');
   for (const m of text.matchAll(/import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']/g)) {
-    const key = (m[2].match(KEY_RE) || [null])[0];
+    const key = resolveImportKey(file, m[2], COMPONENT_DIRS);
     if (!key) continue;
     for (const spec of m[1].split(',')) {
       const name = (spec.split(/\s+as\s+/).pop() || '').trim();

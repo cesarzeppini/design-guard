@@ -32,6 +32,42 @@ export function importMatchers(componentDirs) {
 
 export const componentKey = (dir, file) => `${tailOf(dir)}/${baseName(file)}`;
 
+// POSIX path normalisation without node:path (this file also runs in the browser).
+function joinPath(base, rel) {
+  const out = [];
+  for (const seg of `${base}/${rel}`.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') out.pop();
+    else out.push(seg);
+  }
+  return out.join('/');
+}
+
+export const IMPORT_FROM_RE = /\bfrom\s+["']([^"']+)["']/;
+
+// The component key an import specifier refers to, or null. A relative specifier
+// is resolved against the importing file, so `../ui/card` from
+// src/components/shared/ reaches src/components/ui/card even though its text
+// never contains "components/ui". Aliases (@/, ~/, bare), and relative paths that
+// don't resolve into a component directory, are matched by directory tail as before.
+export function resolveImportKey(fromFile, spec, componentDirs) {
+  const dirs = componentDirs.map(norm);
+  if (spec.startsWith('.')) {
+    const from = norm(fromFile).split('/').slice(0, -1).join('/');
+    const target = joinPath(from, spec);
+    for (const d of dirs) {
+      if (!target.startsWith(d + '/')) continue;
+      const seg = target.slice(d.length + 1).split('/')[0].replace(/\.[^.]+$/, '');
+      if (/^[A-Za-z0-9_-]+$/.test(seg)) return `${tailOf(d)}/${seg}`;
+    }
+    // Didn't resolve into a component directory: fall back to the tail match, as
+    // before, so resolution only ever adds matches.
+  }
+  const { KEY_RE } = importMatchers(dirs);
+  const m = KEY_RE && spec.match(KEY_RE);
+  return m ? m[0] : null;
+}
+
 export const isMarkedText = (text) =>
   text.replace(/^\uFEFF/, '').split(/\r?\n/).slice(0, MARKER_WINDOW).some((l) => MARKER_RE.test(l));
 
@@ -178,15 +214,13 @@ const hasExt = (file, exts) => exts.some((x) => file.endsWith(x));
 // component in use since before the guard was installed appears in no diff.
 export function scanProject({ files, componentDirs }) {
   const dirs = componentDirs.map(norm);
-  const { IMPORT_RE, KEY_RE } = importMatchers(dirs);
-
   const importers = new Map(); // key -> Set of importing files
-  if (IMPORT_RE) {
+  if (dirs.length) {
     for (const [file, text] of Object.entries(files)) {
       if (!hasExt(file, LINT_EXTS)) continue;
       for (const line of text.split('\n')) {
-        if (!IMPORT_RE.test(line)) continue;
-        const key = (line.match(KEY_RE) || [null])[0];
+        const spec = line.match(IMPORT_FROM_RE);
+        const key = spec && resolveImportKey(file, spec[1], dirs);
         if (!key) continue;
         if (!importers.has(key)) importers.set(key, new Set());
         importers.get(key).add(file);
