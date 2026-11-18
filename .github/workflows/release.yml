@@ -1,0 +1,67 @@
+# Tags each release and publishes a GitHub Release.
+#
+# On push to main: if package.json's version has no tag yet, tag that commit
+# v<version>. Releases are cut by bumping the version in a PR; merging it is the
+# release.
+#
+# On demand (workflow_dispatch): tag a given commit, for backfilling a release
+# that was merged before this workflow existed.
+name: Release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to create, e.g. v0.2.0
+        required: true
+      sha:
+        description: Commit to tag (full or short SHA on main)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Pick tag and commit
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_TAG: ${{ inputs.tag }}
+          IN_SHA: ${{ inputs.sha }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            tag="$IN_TAG"
+            sha="$(git rev-parse --verify "$IN_SHA^{commit}")"
+            git merge-base --is-ancestor "$sha" origin/main \
+              || { echo "::error::$IN_SHA is not on main"; exit 1; }
+            version="$(git show "$sha:package.json" | node -e 'process.stdin.on("data",d=>console.log(JSON.parse(d).version))')"
+            [ "v$version" = "$tag" ] \
+              || { echo "::error::$tag does not match package.json ($version) at $sha"; exit 1; }
+          else
+            tag="v$(node -p 'require("./package.json").version')"
+            sha="$GITHUB_SHA"
+          fi
+          echo "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::bad tag $tag"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists, nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and publish release
+        if: steps.pick.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pick.outputs.tag }}
+          SHA: ${{ steps.pick.outputs.sha }}
+        run: |
+          gh release create "$TAG" --target "$SHA" --title "$TAG" --generate-notes
