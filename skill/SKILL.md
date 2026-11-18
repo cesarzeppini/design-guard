@@ -163,6 +163,7 @@ Consequences:
 
 - Component used but its file has no `@approved` marker → park it: note whether it should be marked (a question for the human) or replaced with an approved component. Don't use it silently, don't decide silently.
 - Task genuinely needs a component that doesn't exist yet → park it with the closest existing match named.
+- The closest approved component exists but doesn't fit the role (a `Card` asked to behave like a dialog, a `Badge` stretched into a button) → park it with that match named. **Never bend an approved component into a role it wasn't designed for**: an override, a wrapper or a misused variant to make it fit is drift that passes the check. The fix may be a new variant or a new component, and that's the human's call.
 - Component directory missing, or no `components:` key and the default directory doesn't exist → report it as a finding and fall back to flagging only mechanical violations.
 - **No component carries the marker yet** → report that plainly. Everything is unapproved, which is the correct reading of a project that hasn't approved anything, not a reason to assume the check is misconfigured.
 
