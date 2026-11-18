@@ -1,0 +1,50 @@
+# TEMPORARY: exercises action.yml from this branch on a real PR checkout.
+# Remove before merging.
+#
+# This PR changes skill/allowed-customization.md, so the approvals check must
+# report it. Lint targets the demo's component directory, which is never linted,
+# so it is clean and only the Approvals step decides the outcome.
+name: Self-test action
+on: [pull_request]
+jobs:
+  approvals-fail:
+    name: approvals fail the job (fail-on-approvals default)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4   # shallow, merge commit: the default
+      - id: guard
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: examples/demo
+          path: src/components/ui
+      - name: Expect failure
+        run: |
+          echo "guard outcome: ${{ steps.guard.outcome }}"
+          test "${{ steps.guard.outcome }}" = "failure"
+
+  approvals-warn:
+    name: approvals warn (fail-on-approvals false)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          working-directory: examples/demo
+          path: src/components/ui
+          fail-on-approvals: false
+
+  lint-fails-on-demo:
+    name: lint still fails on the demo's violations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: guard
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: examples/demo
+          path: src
+          check-approvals: false
+      - name: Expect failure
+        run: test "${{ steps.guard.outcome }}" = "failure"
