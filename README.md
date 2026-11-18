@@ -4,6 +4,8 @@
 
 **Keep AI-generated UI inside your design system.**
 
+It keeps AI output consistent with the design decisions you've already made. It doesn't judge whether the result is good design (see [What it doesn't do](#what-it-doesnt-do)).
+
 AI coding tools are fast and they drift. Ask for a dashboard and you get a raw `<button>`, a hex color, `<Card className="bg-muted rounded-xl">`, `<h1 className="text-2xl font-semibold">` — each one plausible, none of them your system. Design Guard stops that.
 
 It has two halves that work together:
@@ -68,6 +70,20 @@ Layout classes (`mt-4`, `flex`, `max-w-md`) stay legal. See [`skill/allowed-cust
 
 An override on an approved component isn't treated as a style problem. It's a signal the component is missing a variant, so it gets parked and a variant is proposed.
 
+## What it doesn't do
+
+Design Guard checks what's **written** against decisions your team has **already made**: which components are approved, which variants and tokens exist. It's deliberately narrow, and it doesn't replace these:
+
+| Not covered | Why | Pair it with |
+|---|---|---|
+| Visual QA: does it look right? | It reads source code, not the rendered page. Fully compliant code can still look wrong. | Screenshot or visual-regression tests, such as Playwright `toHaveScreenshot()` or Chromatic |
+| UX and layout judgement | Whether the button is in the right place, the hierarchy makes sense or the flow is intuitive is a design review question. | Design review |
+| Accessibility audit | It flags clickable `div`s and hand-rolled roles because they bypass your components, but it doesn't check contrast, labels or focus order. | `eslint-plugin-jsx-a11y`, axe |
+| Responsive behaviour | Nothing is rendered at any screen size. | Visual tests at several viewports |
+| Whether your design system is right | It enforces the approved set as-is. If the closest component doesn't fit, the assistant parks the case for a human instead of forcing it. | Your design-system owners |
+
+Two interfaces can both pass Design Guard while one is well designed and the other isn't. What it guarantees is that both were built from your system, not from improvised copies of it.
+
 ## Try it in 30 seconds
 
 ```bash
@@ -123,7 +139,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: cesarzeppini/design-guard@v0.8.0
+      - uses: cesarzeppini/design-guard@v0.8.1
         with:
           path: src
 ```
@@ -135,7 +151,7 @@ On pull requests it also runs the **approvals check** (`--added-markers` against
 That failure is deliberate, even when a person really did ask for the approval. The check can't tell who asked, so it makes sure a human looks before merging. The intended flow is that the reviewer reads the summary, confirms each item was requested, and merges anyway. If a red check on every approval is too much, report it as a warning instead:
 
 ```yaml
-      - uses: cesarzeppini/design-guard@v0.8.0
+      - uses: cesarzeppini/design-guard@v0.8.1
         with:
           path: src
           fail-on-approvals: false   # list approvals in the summary, don't fail
