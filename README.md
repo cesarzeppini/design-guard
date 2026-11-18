@@ -84,6 +84,18 @@ node ../../scripts/ds-lint.mjs --registry src
 
 prints what's approved, what's unmarked but in use (each one a decision waiting for you), and a count of unmarked-and-unused files.
 
+## Adopting it on an existing codebase
+
+On a project that has been running for a while, the first lint finds everything at once, and a CI check that fails from day one is a check people turn off. Record today's findings as a baseline instead:
+
+```bash
+node scripts/ds-lint.mjs src --baseline-write   # writes design-guard.baseline.json; commit it
+```
+
+From then on the check (locally and in the Action) fails only on findings that aren't in the baseline, and says how many recorded ones it skipped. Findings are matched without line numbers, so edits elsewhere in a file don't resurface them. When some get fixed, the run says so; re-run `--baseline-write` to shrink the file and lock that in. `--no-baseline` shows everything.
+
+Writing or growing the baseline is approval in bulk, so it's treated like a marker: `--added-markers` (and the Action's approvals check) reports every entry it gains, and `--codeowners` covers the file. Configuration problems, such as an unlisted component folder, are never recorded.
+
 ## The /components page
 
 A dev-only route inside your own project that shows what's approved and what's waiting for a decision — status badges, usage counts, variants and props, adoption stats, and an Approve / Revoke button on every component.
@@ -111,7 +123,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: cesarzeppini/design-guard@v0.7.0
+      - uses: cesarzeppini/design-guard@v0.8.0
         with:
           path: src
 ```
@@ -123,7 +135,7 @@ On pull requests it also runs the **approvals check** (`--added-markers` against
 That failure is deliberate, even when a person really did ask for the approval. The check can't tell who asked, so it makes sure a human looks before merging. The intended flow is that the reviewer reads the summary, confirms each item was requested, and merges anyway. If a red check on every approval is too much, report it as a warning instead:
 
 ```yaml
-      - uses: cesarzeppini/design-guard@v0.7.0
+      - uses: cesarzeppini/design-guard@v0.8.0
         with:
           path: src
           fail-on-approvals: false   # list approvals in the summary, don't fail
@@ -198,11 +210,13 @@ It falls back to `context/STACK.md` if that's where you keep project facts.
 
 ```bash
 node scripts/ds-lint.mjs src                    # lint
+node scripts/ds-lint.mjs src --baseline-write   # record today's findings; later runs fail only on new ones
+node scripts/ds-lint.mjs src --no-baseline      # lint, showing recorded findings too
 node scripts/ds-lint.mjs --registry             # approved / in use / unused
 node scripts/ds-lint.mjs --scan                 # every component as JSON
 node scripts/ds-lint.mjs --approve <file...>    # add the @approved marker
 node scripts/ds-lint.mjs --unapprove <file...>  # remove it
-node scripts/ds-lint.mjs --added-markers main...HEAD  # markers, deprecations, narrowed config, exceptions, CODEOWNERS
+node scripts/ds-lint.mjs --added-markers main...HEAD  # markers, deprecations, narrowed config, exceptions, CODEOWNERS, baseline growth
 node scripts/ds-lint.mjs --codeowners @org/team     # CODEOWNERS lines for everything that decides approval
 ```
 

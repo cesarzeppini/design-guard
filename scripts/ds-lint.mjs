@@ -2,7 +2,9 @@
 // design-system-guard mechanical linter.
 //
 // Usage:
-//   ds-lint.mjs <file-or-dir> [...]          lint (defaults to src/)
+//   ds-lint.mjs <file-or-dir> [...]          lint (defaults to src/); skips findings in design-guard.baseline.json
+//     --baseline-write                       record today's findings as the baseline (a human's act)
+//     --no-baseline                          show every finding, recorded or not
 //   ds-lint.mjs --added-markers <git-range>  audit @approved markers, config edits that narrow the check,
 //                                            @deprecated changes, and changes to allowed-customization.md
 //                                            or CODEOWNERS
@@ -266,6 +268,16 @@ function addedMarkers(range) {
     console.log('   Needs-you item, naming who asked for it.');
   }
 
+  const grown = baselineGrowth(range);
+  if (grown.length > 0) {
+    console.log('');
+    console.log(`== ${BASELINE_FILE} gained findings in ${range}`);
+    grown.forEach((l) => console.log(`  ${l}`));
+    console.log('');
+    console.log('   Each recorded finding stops failing the check. Recording one is approving it:');
+    console.log('   report it as a Needs-you item, naming who asked for it.');
+  }
+
   const deprecations = found.deprecations;
   if (deprecations.size > 0) {
     console.log('');
@@ -276,7 +288,7 @@ function addedMarkers(range) {
     console.log('   Report each as a Needs-you item, naming who asked for it.');
   }
 
-  return found.size > 0 || weakened.length > 0 || exceptions.size > 0 || owners.size > 0 || deprecations.size > 0 ? 1 : 0;
+  return found.size > 0 || weakened.length > 0 || exceptions.size > 0 || owners.size > 0 || deprecations.size > 0 || grown.length > 0 ? 1 : 0;
 }
 
 // A marker counts only where it confers approval: a marker comment within the
@@ -292,6 +304,25 @@ function markerLines(text) {
     .slice(0, MARKER_WINDOW)
     .filter((l) => MARKER_RE.test(l))
     .map((l) => l.trim());
+}
+
+// Entries the baseline gained across the range (new, or a higher count). Fixing
+// findings shrinks it; only growth is a decision someone has to own.
+function baselineGrowth(range) {
+  let ends;
+  try {
+    ends = rangeEnds(range);
+  } catch {
+    return [];
+  }
+  const was = readBaseline(readAtRev(ends.base)(BASELINE_FILE)) ?? new Map();
+  const now = readBaseline((ends.head === null ? readWorkingFile : readAtRev(ends.head))(BASELINE_FILE)) ?? new Map();
+  const out = [];
+  for (const [k, n] of [...now].sort(([a], [b]) => a.localeCompare(b))) {
+    const before = was.get(k) ?? 0;
+    if (n > before) out.push(`${k}${n - before > 1 ? `  (x${n - before})` : ''}`);
+  }
+  return out;
 }
 
 function deprecationLines(text) {
@@ -1341,8 +1372,96 @@ function unlistedComponentDirs() {
   return [...out].sort();
 }
 
-function lint(targets) {
+// ---- baseline ----
+//
+// On an existing codebase, every old violation fails CI from day one, so teams
+// either never turn the check on or learn to ignore it. A baseline records today's
+// findings once (--baseline-write) and the check then fails only on new ones.
+// Recorded findings stay listed as a count, and the file shrinks as they're fixed.
+// Writing or growing it is approval in bulk: --added-markers reports any entry it
+// gains.
+
+const BASELINE_FILE = 'design-guard.baseline.json';
+
+// A finding's identity without its line number, so edits elsewhere in the file
+// don't turn recorded findings into new ones. Identical findings in one file are
+// counted, not collapsed.
+const fingerprint = (section, line) => `${section} | ${line.replace(/^([^\s:]+):\d+:/, '$1:').replace(/\s+/g, ' ').trim()}`;
+
+function readBaseline(text) {
+  if (text == null) return null;
+  try {
+    const data = JSON.parse(text);
+    return new Map(Object.entries(data.findings ?? {}).filter(([, n]) => Number.isInteger(n) && n > 0));
+  } catch {
+    return null;
+  }
+}
+
+function makeReporter(baseline) {
+  const remaining = new Map(baseline ?? []);
+  const all = new Map(); // fingerprint -> count, for --baseline-write
   let hits = 0;
+  let recorded = 0;
+  return {
+    // A section of findings. `baselinable: false` for configuration problems,
+    // which are decisions to make, not debt to record.
+    section(title, lines, notes = [], { baselinable = true } = {}) {
+      let shown = lines;
+      if (baselinable) {
+        for (const l of lines) {
+          const k = fingerprint(title, l);
+          all.set(k, (all.get(k) ?? 0) + 1);
+        }
+        shown = lines.filter((l) => {
+          const k = fingerprint(title, l);
+          const n = remaining.get(k) ?? 0;
+          if (n === 0) return true;
+          remaining.set(k, n - 1);
+          recorded++;
+          return false;
+        });
+      }
+      if (shown.length === 0) return;
+      console.log(`== ${title}`);
+      shown.forEach((l) => console.log(l));
+      console.log('');
+      if (notes.length) {
+        notes.forEach((n) => console.log(`   ${n}`));
+        console.log('');
+      }
+      hits = 1;
+    },
+    note(lines) {
+      lines.forEach((l) => console.log(l));
+      console.log('');
+    },
+    fail() {
+      hits = 1;
+    },
+    get hits() {
+      return hits;
+    },
+    get recorded() {
+      return recorded;
+    },
+    get fixed() {
+      return [...remaining.values()].reduce((a, b) => a + b, 0);
+    },
+    all,
+  };
+}
+
+function lint(targets, { baselineMode = 'use' } = {}) {
+  const baseline = baselineMode === 'use' ? readBaseline(readWorkingFile(BASELINE_FILE)) : null;
+  if (baselineMode === 'use' && readWorkingFile(BASELINE_FILE) !== null && baseline === null) {
+    console.log(`== ${BASELINE_FILE} could not be read — ignoring it, every finding is shown`);
+    console.log('');
+  }
+  const r = makeReporter(baseline);
+  const quiet = baselineMode === 'write';
+  const log = console.log;
+  if (quiet) console.log = () => {};
 
   const files = [...new Set(targets.flatMap((t) => filesUnder(t, LINT_EXTS)))]
     .filter((f) => !inComponentDir(f))
@@ -1356,130 +1475,90 @@ function lint(targets) {
         if (re.test(lines[i])) found.push(`${f}:${i + 1}:${lines[i]}`);
       }
     }
-    if (found.length) {
-      console.log(`== ${label}`);
-      found.forEach((l) => console.log(l));
-      console.log('');
-      hits = 1;
-    }
+    r.section(label, found);
   }
 
   if (TYPOGRAPHY_BASE) {
-    const typo = semanticTypographyHits(files);
-    if (typo.length) {
-      console.log('== typography utilities on semantic text elements');
-      typo.forEach((l) => console.log(l));
-      console.log('');
-      console.log('   Layout utilities (mt-4, max-w-md, flex) stay legal on these elements.');
-      console.log('   Delete the utility when the base layer already produces it; park it when');
-      console.log('   the value is one the scale does not have.');
-      console.log('');
-      hits = 1;
-    }
+    r.section('typography utilities on semantic text elements', semanticTypographyHits(files), [
+      'Layout utilities (mt-4, max-w-md, flex) stay legal on these elements.',
+      'Delete the utility when the base layer already produces it; park it when',
+      'the value is one the scale does not have.',
+    ]);
   } else if (!TYPOGRAPHY_BASE_DECLARED) {
     // Key absent. Whether that is a gap or a genuine "off" depends on the CSS.
     const base = detectBaseLayer();
     if (base) {
-      console.log('== typography-base is not set, but a base layer styles semantic elements');
-      console.log(`   ${base.file}  ->  ${base.selector}`);
-      console.log('');
-      console.log('   Typography utilities on headings, paragraphs and links are going');
-      console.log('   unchecked against a base layer that already sets them. Set');
-      console.log('   `typography-base: true` in design-guard.config (or context/STACK.md) to check them.');
-      console.log('');
-      hits = 1;
+      r.note([
+        '== typography-base is not set, but a base layer styles semantic elements',
+        `   ${base.file}  ->  ${base.selector}`,
+        '',
+        '   Typography utilities on headings, paragraphs and links are going',
+        '   unchecked against a base layer that already sets them. Set',
+        '   `typography-base: true` in design-guard.config (or context/STACK.md) to check them.',
+      ]);
+      r.fail();
     } else {
-      console.log('== typography check off — no base layer found styling semantic elements');
-      console.log('   Record it: `typography-base: false` in design-guard.config (or context/STACK.md). This line');
-      console.log('   stops once the decision is written down.');
-      console.log('');
+      r.note([
+        '== typography check off — no base layer found styling semantic elements',
+        '   Record it: `typography-base: false` in design-guard.config (or context/STACK.md). This line',
+        '   stops once the decision is written down.',
+      ]);
     }
   }
 
   const tokenCheck = tokenHits(files);
-  if (tokenCheck.found.length) {
-    console.log("== colour utility that isn't a project token");
-    [...new Set(tokenCheck.found)].forEach((l) => console.log(l));
-    console.log('');
-    console.log("   Tokens are read from the project's CSS (--color-* in @theme, or colour");
-    console.log('   variables like --primary). Use the token that matches; if none does, that');
-    console.log('   is a design decision: park it and propose the token.');
-    console.log('');
-    hits = 1;
-  } else if (tokenCheck.noTokens) {
-    console.log('== token check off — no colour tokens found in the project CSS');
-    console.log('   Custom colour utilities are in use, but no --color-* or colour variables were');
-    console.log('   found to check them against. Only the default palette is being checked.');
-    console.log('');
+  r.section("colour utility that isn't a project token", [...new Set(tokenCheck.found)], [
+    "Tokens are read from the project's CSS (--color-* in @theme, or colour",
+    'variables like --primary). Use the token that matches; if none does, that',
+    'is a design decision: park it and propose the token.',
+  ]);
+  if (tokenCheck.noTokens) {
+    r.note([
+      '== token check off — no colour tokens found in the project CSS',
+      '   Custom colour utilities are in use, but no --color-* or colour variables were',
+      '   found to check them against. Only the default palette is being checked.',
+    ]);
   }
 
   const handRolled = handRolledHits(files);
-  if (handRolled.errors.length) {
-    console.log('== hand-rolled interactive element');
-    handRolled.errors.forEach((l) => console.log(l));
-    console.log('');
-    console.log('   A plain element given an interactive role or a click handler is a control');
-    console.log('   built by hand. Use the design-system component (Button, Tabs, Dialog,');
-    console.log('   Checkbox...). If none exists, park it and propose one.');
-    console.log('');
-    hits = 1;
-  }
+  r.section('hand-rolled interactive element', handRolled.errors, [
+    'A plain element given an interactive role or a click handler is a control',
+    'built by hand. Use the design-system component (Button, Tabs, Dialog,',
+    'Checkbox...). If none exists, park it and propose one.',
+  ]);
 
-  const variants = variantHits(files);
-  if (variants.length) {
-    console.log("== variant or size the component doesn't declare");
-    variants.forEach((l) => console.log(l));
-    console.log('');
-    console.log('   Use one of the declared values. If none fits, that is the finding: park it');
-    console.log('   and propose the variant, rather than passing a value the component ignores.');
-    console.log('');
-    hits = 1;
-  }
+  r.section("variant or size the component doesn't declare", variantHits(files), [
+    'Use one of the declared values. If none fits, that is the finding: park it',
+    'and propose the variant, rather than passing a value the component ignores.',
+  ]);
 
-  const spreads = spreadHits(files);
-  if (spreads.length) {
-    console.log('== props spread onto a design-system component');
-    spreads.forEach((l) => console.log(l));
-    console.log('');
-    console.log('   A spread passes className and style through unchecked, so any caller can');
-    console.log('   restyle the component. Pass the props the component needs by name. Form');
-    console.log("   wiring ({...field}, {...register('x')}) is allowed.");
-    console.log('');
-    hits = 1;
-  }
+  r.section('props spread onto a design-system component', spreadHits(files), [
+    'A spread passes className and style through unchecked, so any caller can',
+    'restyle the component. Pass the props the component needs by name. Form',
+    "wiring ({...field}, {...register('x')}) is allowed.",
+  ]);
 
-  const appearance = appearanceHits(files);
-  if (appearance.length) {
-    console.log('== appearance override on a design-system component');
-    appearance.forEach((l) => console.log(l));
-    console.log('');
-    console.log('   Semantic tokens are not an exception here. Layout classes (spacing, flex,');
-    console.log('   grid, size, position) stay legal. If the component has no variant for this,');
-    console.log('   that is the finding: park it and propose the variant.');
-    console.log('');
-    hits = 1;
-  }
+  r.section('appearance override on a design-system component', appearanceHits(files), [
+    'Semantic tokens are not an exception here. Layout classes (spacing, flex,',
+    'grid, size, position) stay legal. If the component has no variant for this,',
+    'that is the finding: park it and propose the variant.',
+  ]);
 
-  const unlisted = unlistedComponentDirs();
-  if (unlisted.length) {
-    console.log('== component directories not listed in components:');
-    unlisted.forEach((d) => console.log(`  ${d}`));
-    console.log('');
-    console.log('   These are never examined, so their components are neither approved nor');
-    console.log('   flagged. Add each to components: in design-guard.config (or context/STACK.md), or record it under');
-    console.log('   components-ignore: to say the exclusion is deliberate.');
-    console.log('');
-    hits = 1;
-  }
+  r.section('component directories not listed in components:', unlistedComponentDirs().map((d) => `  ${d}`), [
+    'These are never examined, so their components are neither approved nor',
+    'flagged. Add each to components: in design-guard.config (or context/STACK.md), or record it under',
+    'components-ignore: to say the exclusion is deliberate.',
+  ], { baselinable: false });
 
   const existing = COMPONENT_DIRS.filter(isDir);
   if (existing.length === 0) {
+    console.log = log;
     console.log(
       '== component directory not found (set components: in design-guard.config (or context/STACK.md)) — approval cannot be verified'
     );
     console.log(`   looked for: ${COMPONENT_DIRS.join(' ')}`);
     console.log('');
-    return 1;
+    return quiet ? 2 : 1;
   }
 
   const approved = new Set();
@@ -1493,11 +1572,12 @@ function lint(targets) {
   }
 
   if (approved.size === 0) {
-    console.log(`== no component in ${existing.join(' ')} carries an @approved marker`);
-    console.log(`   (looked in the first ${MARKER_WINDOW} lines of each file)`);
-    console.log('   Every component below is therefore unapproved. If that looks wrong, a human');
-    console.log('   marks components — agents never add @approved on their own initiative.');
-    console.log('');
+    r.note([
+      `== no component in ${existing.join(' ')} carries an @approved marker`,
+      `   (looked in the first ${MARKER_WINDOW} lines of each file)`,
+      '   Every component below is therefore unapproved. If that looks wrong, a human',
+      '   marks components — agents never add @approved on their own initiative.',
+    ]);
   }
 
   const unapproved = new Set();
@@ -1512,35 +1592,55 @@ function lint(targets) {
     }
   }
 
-  if (outgoing.size > 0) {
-    console.log('== deprecated component in use');
-    [...outgoing].sort().forEach((l) => console.log(l));
-    console.log('');
-    console.log('   Marked @deprecated in its own file: the team is phasing it out. Move each use');
-    console.log('   to the replacement. If there is none, or it does not fit, park it.');
-    console.log('');
-    hits = 1;
-  }
-
-  if (unapproved.size > 0) {
-    console.log('== component used but not marked @approved');
-    [...unapproved].sort().forEach((l) => console.log(l));
-    console.log('');
-    hits = 1;
-  }
+  r.section('deprecated component in use', [...outgoing].sort(), [
+    'Marked @deprecated in its own file: the team is phasing it out. Move each use',
+    'to the replacement. If there is none, or it does not fit, park it.',
+  ]);
+  r.section('component used but not marked @approved', [...unapproved].sort());
 
   if (handRolled.warnings.length) {
-    console.log('== warning (does not fail the check): link styled as a button');
-    handRolled.warnings.forEach((l) => console.log(l));
-    console.log('');
-    console.log('   A link with a background, rounded corners and padding is usually a button');
-    console.log('   in disguise. If it should look like one, use Button (asChild, or its link');
-    console.log('   variant) so it stays in the system. A heuristic: judge each one.');
-    console.log('');
+    r.note([
+      '== warning (does not fail the check): link styled as a button',
+      ...handRolled.warnings,
+      '',
+      '   A link with a background, rounded corners and padding is usually a button',
+      '   in disguise. If it should look like one, use Button (asChild, or its link',
+      '   variant) so it stays in the system. A heuristic: judge each one.',
+    ]);
   }
 
-  if (hits === 0) console.log('Design system check: clean');
-  return hits;
+  console.log = log;
+
+  if (quiet) {
+    const findings = Object.fromEntries([...r.all].sort(([a], [b]) => a.localeCompare(b)));
+    const total = [...r.all.values()].reduce((a, b) => a + b, 0);
+    writeFileSync(
+      BASELINE_FILE,
+      JSON.stringify(
+        {
+          about: 'Design Guard baseline: findings recorded on purpose, so the check fails only on new ones. Written by `ds-lint --baseline-write`; only a human decides to write or grow it.',
+          findings,
+        },
+        null,
+        2
+      ) + '\n'
+    );
+    console.log(`Recorded ${total} finding(s) in ${BASELINE_FILE}.`);
+    console.log('From now on the check fails only on findings not in it. It shrinks as they are');
+    console.log('fixed: re-run --baseline-write after fixing some to lock that in.');
+    return 0;
+  }
+
+  if (r.recorded > 0) {
+    console.log(`${r.recorded} existing finding(s) recorded in ${BASELINE_FILE}, not shown (--no-baseline shows them).`);
+  }
+  if (r.fixed > 0) {
+    console.log(`${r.fixed} recorded finding(s) no longer occur. Re-run --baseline-write to shrink the baseline.`);
+  }
+  if (r.recorded > 0 || r.fixed > 0) console.log('');
+
+  if (r.hits === 0) console.log('Design system check: clean');
+  return r.hits;
 }
 
 // ---- mode: --codeowners ----
@@ -1588,6 +1688,8 @@ function codeownersMode(owners) {
   // creating one would override keys kept in context/STACK.md. STACK.md when present.
   const configs = CONFIG_FILES.filter((f, i) => i === 0 || readWorkingFile(f) !== null);
   for (const f of configs) lines.push(`${ownersPath(prefix + f)} ${who}`);
+  // The baseline, always: writing one records findings so they stop failing.
+  lines.push(`${ownersPath(prefix + BASELINE_FILE)} ${who}`);
 
   const listed = gitOut(['ls-files', '--cached', '--others', '--exclude-standard', '--full-name'], root);
   const policies = (listed === null ? [...walk('.')].map(norm) : listed.split('\n'))
@@ -1629,5 +1731,6 @@ if (argv[0] === '--added-markers') {
     targets = ['src/routes', 'src/components'].filter(isDir);
     if (targets.length === 0) targets = ['src'];
   }
-  process.exit(lint(targets));
+  const baselineMode = argv.includes('--baseline-write') ? 'write' : argv.includes('--no-baseline') ? 'ignore' : 'use';
+  process.exit(lint(targets, { baselineMode }));
 }

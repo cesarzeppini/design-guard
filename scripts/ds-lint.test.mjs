@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1779,5 +1779,102 @@ test('variants with brackets or several prefixes are stripped before every class
   const { out } = run(root, ['src/routes']);
   assert.match(out, /<Card> data-\[state=open\]:bg-muted \(background\)/);
   assert.match(out, /<h1> md:hover:text-xl \(text size\)/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---- baseline ----
+// On an existing codebase every old violation failed CI from day one. A baseline
+// records today's findings once; the check then fails only on new ones.
+
+const BL = {
+  'design-guard.config': 'components: src/components/ui\ntypography-base: false\n',
+  'src/components/ui/card.tsx': '// @approved\nexport const Card = (p: any) => null;\n',
+  'src/routes/old.tsx': [
+    'import { Card } from "@/components/ui/card";',
+    'export const Old = () => (<>',
+    '  <button>a</button>',
+    '  <button>a</button>',
+    '  <Card className="bg-muted" />',
+    '</>);',
+  ].join('\n'),
+};
+
+test('--baseline-write records findings; later runs fail only on new ones', () => {
+  const root = project(BL);
+  const w = run(root, ['src', '--baseline-write']);
+  assert.equal(w.code, 0, w.out);
+  assert.match(w.out, /Recorded 3 finding\(s\) in design-guard\.baseline\.json/);
+
+  const clean = run(root, ['src']);
+  assert.equal(clean.code, 0, clean.out);
+  assert.match(clean.out, /3 existing finding\(s\) recorded in design-guard\.baseline\.json, not shown/);
+  assert.match(clean.out, /Design system check: clean/);
+
+  // edits above the recorded findings shift their lines: still recorded
+  const old = BL['src/routes/old.tsx'].replace('export const Old', '// a comment\n// another\nexport const Old');
+  writeFileSync(join(root, 'src/routes/old.tsx'), old);
+  assert.equal(run(root, ['src']).code, 0);
+
+  // a third identical <button> in the same file is new: counts, not collapse
+  writeFileSync(join(root, 'src/routes/old.tsx'), old.replace('<button>a</button>', '<button>a</button>\n  <button>a</button>'));
+  const more = run(root, ['src']);
+  assert.equal(more.code, 1);
+  assert.equal(more.out.match(/<button>a<\/button>/g).length, 1);
+
+  // a new file's findings are new
+  writeFileSync(join(root, 'src/routes/new.tsx'), 'export const N = () => <input />;\n');
+  assert.match(run(root, ['src']).out, /src\/routes\/new\.tsx:1:/);
+
+  // --no-baseline shows everything
+  const all = run(root, ['src', '--no-baseline']);
+  assert.match(all.out, /<Card> bg-muted/);
+  assert.doesNotMatch(all.out, /recorded in design-guard\.baseline\.json/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('baseline: fixed findings are counted, config problems are never recorded, a broken file is ignored', () => {
+  const root = project(BL);
+  run(root, ['src', '--baseline-write']);
+  writeFileSync(join(root, 'src/routes/old.tsx'), BL['src/routes/old.tsx'].replace('  <Card className="bg-muted" />\n', ''));
+  const fixed = run(root, ['src']);
+  assert.equal(fixed.code, 0, fixed.out);
+  assert.match(fixed.out, /1 recorded finding\(s\) no longer occur\. Re-run --baseline-write/);
+
+  // an unlisted component directory is a decision, not debt: never recorded
+  mkdirSync(join(root, 'src/components/shared'), { recursive: true });
+  writeFileSync(join(root, 'src/components/shared/x.tsx'), 'export const X = () => null;\n');
+  run(root, ['src', '--baseline-write']);
+  const unlisted = run(root, ['src']);
+  assert.equal(unlisted.code, 1);
+  assert.match(unlisted.out, /component directories not listed in components:\n  src\/components\/shared/);
+
+  writeFileSync(join(root, 'design-guard.baseline.json'), '{ not json');
+  const broken = run(root, ['src']);
+  assert.match(broken.out, /could not be read — ignoring it, every finding is shown/);
+  assert.match(broken.out, /<Card>|<button>/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports what the baseline gained, not what it lost', () => {
+  const { root, commit } = gitRepo(BL);
+  run(root, ['src', '--baseline-write']);
+  commit('design-guard.baseline.json', readFileSync(join(root, 'design-guard.baseline.json'), 'utf8'));
+  const added = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(added.code, 1);
+  assert.match(added.out, /== design-guard\.baseline\.json gained findings in main\.\.\.HEAD/);
+  assert.match(added.out, /raw interactive HTML element \| src\/routes\/old\.tsx: <button>a<\/button>  \(x2\)/);
+
+  // shrinking it after a fix is not a decision anyone has to own
+  writeFileSync(join(root, 'src/routes/old.tsx'), BL['src/routes/old.tsx'].replace('  <Card className="bg-muted" />\n', ''));
+  run(root, ['src', '--baseline-write']);
+  const shrunk = run(root, ['--added-markers', 'HEAD']);
+  assert.equal(shrunk.code, 0, shrunk.out);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--codeowners covers the baseline file', () => {
+  const root = project({ 'design-guard.config': 'components: src/ui\n' });
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  assert.match(run(root, ['--codeowners', '@ds']).out, /^\/design-guard\.baseline\.json @ds$/m);
   rmSync(root, { recursive: true, force: true });
 });
