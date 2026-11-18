@@ -48,7 +48,7 @@ The config gets the same treatment. Ignoring a directory in `design-guard.config
 |---|---|---|
 | 1 | Raw HTML for core UI | `<button>`, `<input>`, hand-rolled modals |
 | 2 | Off-system component | a component with no `@approved` marker, or a duplicate of one that has it |
-| 3 | Appearance override on an approved component | `<Card className="bg-muted">` — **semantic tokens included** |
+| 3 | Appearance override on an approved component | `<Card className="bg-muted">` — **semantic tokens included** — or `<Button {...props}>`, which forwards any caller's `className` (form wiring like `{...field}` is allowed) |
 | 4 | Typography utilities on semantic elements | `<h1 className="text-2xl font-semibold">` when the base layer already styles `h1` |
 
 Layout classes (`mt-4`, `flex`, `max-w-md`) stay legal. See [`skill/allowed-customization.md`](skill/allowed-customization.md).

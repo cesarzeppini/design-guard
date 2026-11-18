@@ -37,7 +37,7 @@ The project's tokens file (e.g. `tokens.css`) still governs plain elements — a
 - Tailwind default-palette colors: `bg-white` `bg-black` `text-white` `text-black` `bg-gray-100` `text-slate-500`
 - `style={{ ... }}` for anything other than a computed dimension or transform — a calculated `height` is fine, a hardcoded `color` is not
 - `!important` / `!`-prefixed utilities
-- spreading unvalidated props (`{...rest}`) onto a design-system component, which smuggles `className` and `style` past every rule above
+- spreading props (`{...props}`, `{...rest}`) onto a design-system component, which smuggles `className` and `style` past every rule above. Pass what the component needs by name. Form wiring is the exception: `{...field}` and a spread of a call (`{...register('email')}`, `{...getInputProps()}`) carry only value, handlers, name and ref. The linter flags the rest.
 - typography utilities on semantic elements the base layer already styles (see violation 4 in SKILL.md)
 
 ## The one legitimate escape

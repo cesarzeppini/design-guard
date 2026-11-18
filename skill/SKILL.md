@@ -86,7 +86,7 @@ Never treat an omission as deliberate. A deliberate exclusion is written down in
 | --- | --- | --- |
 | 1 | Raw HTML for core UI | `<button>`, `<input>`, `<select>`, `<textarea>`, hand-rolled card / modal / dropdown / tab `<div>` structures |
 | 2 | Off-system component | local component duplicating an `@approved` one; component in a components directory with no `@approved` marker |
-| 3 | Appearance override on a design-system component | `<Card className="bg-muted">`, `border-*`, `ring-*`, `shadow-*`, `rounded-*`, `font-*`, `opacity-*` on an approved component, raw hex/`rgb()`, non-token utilities like `bg-white` `text-black` `text-[#333]`, `!important` |
+| 3 | Appearance override on a design-system component | `<Card className="bg-muted">`, `border-*`, `ring-*`, `shadow-*`, `rounded-*`, `font-*`, `opacity-*` on an approved component, raw hex/`rgb()`, non-token utilities like `bg-white` `text-black` `text-[#333]`, `!important`, `<Button {...props}>` (a spread forwards `className` and `style` unchecked; form wiring like `{...field}` / `{...register('x')}` is fine) |
 | 4 | Typography utilities on semantic text elements | `<h1 className="text-2xl font-semibold">` — the base layer already sets size, weight, colour, tracking and leading on `<h1>`–`<h6>`, `<p>`, `<a>`, `<strong>`, `<blockquote>`, `<li>`, `<label>`, `<legend>` |
 
 Plain layout wrappers (`<div>`, `<section>`, `<span>`, `<ul>`) are fine. The rule targets interactive controls and visual surfaces, not structure.

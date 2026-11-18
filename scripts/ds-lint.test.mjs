@@ -1175,3 +1175,75 @@ test('--added-markers reports a change to CODEOWNERS', () => {
   assert.match(out, /\.github\/CODEOWNERS  \(\+1 -1 lines\)/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- props spread onto a design-system component ----
+// allowed-customization.md forbade it, the linter never checked: <Button {...props}>
+// forwards className and style, so a wrapper lets any caller restyle Button unseen.
+
+const SPREAD_BASE = {
+  'design-guard.config': 'components: src/components/ui\n',
+  'src/components/ui/button.tsx': '// @approved\nexport const Button = (p: any) => null;\n',
+  'src/components/ui/input.tsx': '// @approved\nexport const Input = (p: any) => null;\n',
+};
+
+test('flags a spread on a design-system component in app code and in a wrapper', () => {
+  const root = project({
+    ...SPREAD_BASE,
+    'src/routes/page.tsx': 'import { Button } from "@/components/ui/button";\nexport const P = (props: any) => (\n  <Button\n    variant="primary"\n    {...props}\n  >Go</Button>\n);\n',
+    // the bypass: a wrapper outside the component directories that forwards everything
+    'src/components/shared/my-button.tsx': 'import { Button as B } from "@/components/ui/button";\nexport const MyButton = ({ children, ...rest }: any) => <B {...rest}>{children}</B>;\n',
+  });
+  const { code, out } = run(root, ['src']);
+  assert.equal(code, 1);
+  assert.match(out, /props spread onto a design-system component/);
+  assert.match(out, /src\/routes\/page\.tsx:5: <Button> \{\.\.\.props\}/); // the spread's own line
+  assert.match(out, /src\/components\/shared\/my-button\.tsx:2: <B> \{\.\.\.rest\}/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('a spread inside an expression prop is not a spread on the tag', () => {
+  const root = project({
+    ...SPREAD_BASE,
+    'src/routes/page.tsx': [
+      'import { Button } from "@/components/ui/button";',
+      'export const P = ({ args }: any) => <Button onClick={() => go(...args)} data={{ ...base, x: 1 }}>Go</Button>;',
+      // a spread on a plain element or a third-party component isn't the design system's concern
+      'export const Q = (p: any) => <><div {...p} /><Thing {...p} /></>;',
+    ].join('\n'),
+  });
+  const { out } = run(root, ['src/routes']);
+  assert.doesNotMatch(out, /props spread onto a design-system component/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('form wiring is exempt: {...field} and spreads of a call', () => {
+  const root = project({
+    ...SPREAD_BASE,
+    'src/routes/form.tsx': [
+      'import { Input } from "@/components/ui/input";',
+      'export const F = ({ field, form, register, getInputProps }: any) => (<>',
+      '  <Input {...field} />',
+      '  <Input {...register("email", { required: true })} />',
+      '  <Input {...form.register("name")} />',
+      '  <Input {...getInputProps()} />',
+      '  <Input {...fieldProps} />',
+      '</>);',
+    ].join('\n'),
+  });
+  const { code, out } = run(root, ['src/routes']);
+  assert.equal(code, 1);
+  assert.match(out, /form\.tsx:7: <Input> \{\.\.\.fieldProps\}/); // a near-miss name is not exempt
+  const hits = out.split('\n').filter((l) => l.startsWith('src/routes/form.tsx'));
+  assert.deepEqual(hits, ['src/routes/form.tsx:7: <Input> {...fieldProps}']);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('a spread inside a component directory is composition, not a finding', () => {
+  const root = project({
+    ...SPREAD_BASE,
+    'src/components/ui/icon-button.tsx': '// @approved\nimport { Button } from "./button";\nexport const IconButton = (props: any) => <Button size="icon" {...props} />;\n',
+  });
+  const { out } = run(root, ['src']);
+  assert.doesNotMatch(out, /props spread onto a design-system component/);
+  rmSync(root, { recursive: true, force: true });
+});

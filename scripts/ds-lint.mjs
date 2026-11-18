@@ -841,6 +841,66 @@ function appearanceHits(files) {
   return found;
 }
 
+// ---- props spread onto a design-system component ----
+//
+// `<Button {...props}>` passes whatever the caller sends, className and style
+// included, so a wrapper that forwards props lets any call site restyle the
+// component where no check can see it. Only a spread written as an attribute of the
+// tag counts; `onClick={() => f(...args)}` and `style={{...base}}` are inside an
+// expression, not on the tag. Component directories aren't linted at all: composing
+// one design-system component from another is how the system is built, and those
+// files are guarded by approval.
+//
+// Exempt, because they are how forms are wired and carry only value, handlers,
+// name and ref: a spread of a call (`{...register('email')}`, `{...getInputProps()}`)
+// and react-hook-form's `{...field}`.
+const SPREAD_CALL_RE = /^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\s*\([\s\S]*\)$/;
+const SPREAD_EXEMPT_NAMES = new Set(['field']);
+
+// Each `{...expr}` at the top level of a tag body: [offset, expr].
+function tagSpreads(body) {
+  const out = [];
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        const inner = body.slice(start + 1, i).trim();
+        if (inner.startsWith('...')) out.push([start, inner.slice(3).trim()]);
+        start = -1;
+      }
+    }
+  }
+  return out;
+}
+
+function spreadHits(files) {
+  const found = [];
+  for (const f of files) {
+    const tags = systemTagsIn(f);
+    if (tags.size === 0) continue;
+    const text = readLines(f).join('\n');
+    OPEN_TAG_RE.lastIndex = 0;
+    let m;
+    while ((m = OPEN_TAG_RE.exec(text))) {
+      const tag = m[1];
+      if (!tags.has(tag)) continue;
+      const bodyStart = OPEN_TAG_RE.lastIndex;
+      for (const [offset, expr] of tagSpreads(tagBodyAt(text, bodyStart))) {
+        if (SPREAD_EXEMPT_NAMES.has(expr) || SPREAD_CALL_RE.test(expr)) continue;
+        const line = text.slice(0, bodyStart + offset).split('\n').length;
+        found.push(`${f}:${line}: <${tag}> {...${expr.replace(/\s+/g, ' ')}}`);
+      }
+    }
+  }
+  return found;
+}
+
 function unlistedComponentDirs() {
   // Component directories the project has but `components:` doesn't list. Without
   // this, an incomplete key narrows the check silently: an unlisted directory is
@@ -935,6 +995,18 @@ function lint(targets) {
       console.log('   stops once the decision is written down.');
       console.log('');
     }
+  }
+
+  const spreads = spreadHits(files);
+  if (spreads.length) {
+    console.log('== props spread onto a design-system component');
+    spreads.forEach((l) => console.log(l));
+    console.log('');
+    console.log('   A spread passes className and style through unchecked, so any caller can');
+    console.log('   restyle the component. Pass the props the component needs by name. Form');
+    console.log("   wiring ({...field}, {...register('x')}) is allowed.");
+    console.log('');
+    hits = 1;
   }
 
   const appearance = appearanceHits(files);
