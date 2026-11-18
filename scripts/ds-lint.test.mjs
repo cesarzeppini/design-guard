@@ -1105,3 +1105,73 @@ test('--added-markers works from a project in a subdirectory of the repository',
   assert.match(out, /src\/components\/ui\/card\.tsx/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- --codeowners ----
+// CODEOWNERS lines for every file that decides approval, generated from the config
+// so there is no second list to keep in sync.
+
+test('--codeowners lists every component dir, the config, the exceptions file and CODEOWNERS itself', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui, src/components/app\n',
+    '.claude/skills/design-guard/allowed-customization.md': '# x\n',
+    'src/components/ui/button.tsx': 'export const Button = () => null;\n',
+  });
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  const { code, out } = run(root, ['--codeowners', '@acme/design-system', '@lead']);
+  assert.equal(code, 0, out);
+  const o = '@acme/design-system @lead';
+  assert.match(out, new RegExp(`^/src/components/ui/ ${o}$`, 'm'));
+  assert.match(out, new RegExp(`^/src/components/app/ ${o}$`, 'm'));
+  assert.match(out, new RegExp(`^/design-guard\\.config ${o}$`, 'm'));
+  assert.match(out, new RegExp(`^/\\.claude/skills/design-guard/allowed-customization\\.md ${o}$`, 'm'));
+  assert.match(out, new RegExp(`^/\\.github/CODEOWNERS ${o}$`, 'm'));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--codeowners owns design-guard.config even when the keys live in context/STACK.md', () => {
+  const root = project({ 'context/STACK.md': 'components: src/ui\n', 'CODEOWNERS': '* @x\n' });
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  const { code, out } = run(root, ['--codeowners', '@ds']);
+  assert.equal(code, 0, out);
+  assert.match(out, /^\/src\/ui\/ @ds$/m);
+  assert.match(out, /^\/design-guard\.config @ds$/m); // creating it would override STACK.md
+  assert.match(out, /^\/context\/STACK\.md @ds$/m);
+  assert.match(out, /^\/CODEOWNERS @ds$/m); // the existing file, not .github/
+  assert.match(out, /no allowed-customization\.md found/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--codeowners writes repository-root paths for a project in a subdirectory', () => {
+  const root = project({
+    'apps/web/design-guard.config': 'components: src/components/ui\n',
+    '.claude/skills/design-guard/allowed-customization.md': '# x\n',
+  });
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  const { code, out } = run(join(root, 'apps/web'), ['--codeowners', '@ds']);
+  assert.equal(code, 0, out);
+  assert.match(out, /^\/apps\/web\/src\/components\/ui\/ @ds$/m);
+  assert.match(out, /^\/apps\/web\/design-guard\.config @ds$/m);
+  assert.match(out, /^\/\.claude\/skills\/design-guard\/allowed-customization\.md @ds$/m); // outside the project, still found
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--codeowners refuses a missing or malformed owner', () => {
+  const root = project({ 'design-guard.config': 'components: src/ui\n' });
+  const none = run(root, ['--codeowners']);
+  assert.equal(none.code, 2);
+  assert.match(none.out, /needs at least one owner/);
+  const bad = run(root, ['--codeowners', 'acme']);
+  assert.equal(bad.code, 2);
+  assert.match(bad.out, /not a GitHub owner: acme/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('--added-markers reports a change to CODEOWNERS', () => {
+  const { root, commit } = gitRepo({ '.github/CODEOWNERS': '/src/components/ui/ @ds\n' });
+  commit('.github/CODEOWNERS', '# owners\n');
+  const { code, out } = run(root, ['--added-markers', 'main...HEAD']);
+  assert.equal(code, 1);
+  assert.match(out, /CODEOWNERS changed/);
+  assert.match(out, /\.github\/CODEOWNERS  \(\+1 -1 lines\)/);
+  rmSync(root, { recursive: true, force: true });
+});

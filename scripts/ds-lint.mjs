@@ -4,7 +4,8 @@
 // Usage:
 //   ds-lint.mjs <file-or-dir> [...]          lint (defaults to src/)
 //   ds-lint.mjs --added-markers <git-range>  audit @approved markers, config edits that narrow the check,
-//                                            and changes to allowed-customization.md
+//                                            and changes to allowed-customization.md or CODEOWNERS
+//   ds-lint.mjs --codeowners <owner...>      CODEOWNERS lines for everything that decides approval
 //   ds-lint.mjs --registry [root]            inventory for the report's registry section
 //   ds-lint.mjs --approve <file...>          add the @approved marker (a human's act — see SKILL.md)
 //   ds-lint.mjs --unapprove <file...>        remove it
@@ -13,7 +14,7 @@
 //
 // Exit 1 when any hit is found, 0 when clean. --registry always exits 0 (inventory,
 // not a finding). --added-markers exits 1 when markers were added, the config narrowed, or
-// allowed-customization.md changed.
+// allowed-customization.md or CODEOWNERS changed.
 //
 // Node rather than shell, deliberately. The shell version accumulated four bugs of
 // kinds this file cannot have: `ls a b` failing when only one glob missed, a sed
@@ -186,6 +187,7 @@ function addedMarkers(range) {
   }
 
   const exceptions = new Map(); // allowed-customization.md path -> { added, removed }
+  const owners = new Map(); // CODEOWNERS path -> { added, removed }
   let file = null; // path on the new side; null when the file was deleted
   let oldFile = null;
   let inHeader = false; // ---/+++ are file headers only between `diff --git` and the first @@
@@ -205,10 +207,12 @@ function addedMarkers(range) {
       // The exceptions file is policy: any line in or out changes what counts
       // as allowed, so every change is reported, wording included.
       const policy = file ?? oldFile;
-      if (policy && basename(policy) === EXCEPTIONS_FILE && line.slice(1).trim() !== '') {
-        const n = exceptions.get(policy) ?? { added: 0, removed: 0 };
+      const kind = policy && line.slice(1).trim() !== '' ? basename(policy) : null;
+      const bucket = kind === EXCEPTIONS_FILE ? exceptions : kind === 'CODEOWNERS' ? owners : null;
+      if (bucket) {
+        const n = bucket.get(policy) ?? { added: 0, removed: 0 };
         n[added ? 'added' : 'removed'] += 1;
-        exceptions.set(policy, n);
+        bucket.set(policy, n);
       }
     }
   }
@@ -252,7 +256,16 @@ function addedMarkers(range) {
     console.log('   exception: report it as a Needs-you item, naming who asked for it.');
   }
 
-  return found.size > 0 || weakened.length > 0 || exceptions.size > 0 ? 1 : 0;
+  if (owners.size > 0) {
+    console.log('');
+    console.log(`== CODEOWNERS changed in ${range}`);
+    for (const [f, n] of [...owners].sort()) console.log(`  ${f}  (+${n.added} -${n.removed} lines)`);
+    console.log('');
+    console.log('   CODEOWNERS decides who reviews approvals. Report the change as a');
+    console.log('   Needs-you item, naming who asked for it.');
+  }
+
+  return found.size > 0 || weakened.length > 0 || exceptions.size > 0 || owners.size > 0 ? 1 : 0;
 }
 
 // A marker counts only where it confers approval: a marker comment within the
@@ -989,12 +1002,77 @@ function lint(targets) {
   return hits;
 }
 
+// ---- mode: --codeowners ----
+// Prints CODEOWNERS lines for every file that decides what counts as approved, so a
+// change to any of them needs a design-system owner's review on GitHub. Generated
+// from the config each time, so there is no second list to keep in sync. Prints
+// only; the human pastes it in.
+
+const OWNER_RE = /^(@[A-Za-z0-9][\w.-]*(\/[\w.-]+)?|[^@\s]+@[^@\s]+\.[^@\s]+)$/;
+const CODEOWNERS_LOCATIONS = ['.github/CODEOWNERS', 'CODEOWNERS', 'docs/CODEOWNERS'];
+
+function gitOut(args, cwd) {
+  try {
+    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return null;
+  }
+}
+
+// CODEOWNERS paths: anchored at the repository root, spaces escaped.
+const ownersPath = (p, dir = false) => `/${p.replace(/ /g, '\\ ')}${dir ? '/' : ''}`;
+
+function codeownersMode(owners) {
+  if (owners.length === 0) {
+    console.error('ds-lint: --codeowners needs at least one owner, e.g. --codeowners @acme/design-system');
+    return 2;
+  }
+  const bad = owners.filter((o) => !OWNER_RE.test(o));
+  if (bad.length > 0) {
+    console.error(`ds-lint: not a GitHub owner: ${bad.join(' ')} (use @user, @org/team or an email)`);
+    return 2;
+  }
+
+  // Paths in CODEOWNERS are relative to the repository root, the project may be a
+  // subdirectory of it.
+  const top = gitOut(['rev-parse', '--show-toplevel']);
+  const prefix = top === null ? '' : gitOut(['rev-parse', '--show-prefix']) ?? '';
+  const root = top ?? '.';
+  const who = owners.join(' ');
+  const lines = [];
+
+  for (const d of COMPONENT_DIRS) lines.push(`${ownersPath(prefix + d, true)} ${who}`);
+
+  // design-guard.config always, even before it exists: it takes precedence, so
+  // creating one would override keys kept in context/STACK.md. STACK.md when present.
+  const configs = CONFIG_FILES.filter((f, i) => i === 0 || readWorkingFile(f) !== null);
+  for (const f of configs) lines.push(`${ownersPath(prefix + f)} ${who}`);
+
+  const listed = gitOut(['ls-files', '--cached', '--others', '--exclude-standard', '--full-name'], root);
+  const policies = (listed === null ? [...walk('.')].map(norm) : listed.split('\n'))
+    .filter((f) => basename(f) === EXCEPTIONS_FILE)
+    .sort();
+  for (const f of policies) lines.push(`${ownersPath(f)} ${who}`);
+
+  // The CODEOWNERS file itself, or anyone could take the entries above out.
+  const existing = CODEOWNERS_LOCATIONS.find((f) => readWorkingFile(join(root, f)) !== null);
+  lines.push(`${ownersPath(existing ?? CODEOWNERS_LOCATIONS[0])} ${who}`);
+
+  console.log('# Design Guard: what counts as approved. Changes here need a design-system owner.');
+  console.log('# Generated by ds-lint --codeowners; re-run it when design-guard.config changes.');
+  if (policies.length === 0) console.log(`# (no ${EXCEPTIONS_FILE} found; re-run after installing the skill)`);
+  for (const l of lines) console.log(l);
+  return 0;
+}
+
 // ---- dispatch ----
 
 const argv = process.argv.slice(2);
 
 if (argv[0] === '--added-markers') {
   process.exit(addedMarkers(argv[1] || 'main...HEAD'));
+} else if (argv[0] === '--codeowners') {
+  process.exit(codeownersMode(argv.slice(1)));
 } else if (argv[0] === '--approve' || argv[0] === '--unapprove') {
   process.exit(approveMode(argv[0] === '--approve', argv.slice(1)));
 } else if (argv[0] === '--serve') {
