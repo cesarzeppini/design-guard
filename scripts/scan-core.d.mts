@@ -1,4 +1,4 @@
-export type ComponentStatus = 'approved' | 'approved-unused' | 'unmarked-in-use' | 'unmarked-unused';
+export type ComponentStatus = 'approved' | 'approved-unused' | 'unmarked-in-use' | 'unmarked-unused' | 'deprecated';
 
 export interface ComponentInfo {
   key: string;
@@ -7,6 +7,9 @@ export interface ComponentInfo {
   dir: string;
   approved: boolean;
   unstyledByDesign: boolean;
+  deprecated: boolean;
+  /** Named in the marker (`@deprecated → NewCard`), when given. */
+  replacement: string | null;
   usageCount: number;
   usedBy: string[];
   status: ComponentStatus;
@@ -18,6 +21,7 @@ export interface Summary {
   total: number;
   approved: number;
   approvedUnused: number;
+  deprecated: number;
   decisionsWaiting: number;
   unused: number;
   approvedUsage: number;
@@ -27,6 +31,7 @@ export interface Summary {
   rawElementFiles: number;
 }
 
+export function deprecationOf(text: string): { replacement: string | null } | null;
 export function resolveImportKey(fromFile: string, spec: string, componentDirs: string[]): string | null;
 export function scanProject(opts: { files: Record<string, string>; componentDirs: string[] }): ComponentInfo[];
 export function summarize(

@@ -4,7 +4,8 @@
 // Usage:
 //   ds-lint.mjs <file-or-dir> [...]          lint (defaults to src/)
 //   ds-lint.mjs --added-markers <git-range>  audit @approved markers, config edits that narrow the check,
-//                                            and changes to allowed-customization.md or CODEOWNERS
+//                                            @deprecated changes, and changes to allowed-customization.md
+//                                            or CODEOWNERS
 //   ds-lint.mjs --codeowners <owner...>      CODEOWNERS lines for everything that decides approval
 //   ds-lint.mjs --registry [root]            inventory for the report's registry section
 //   ds-lint.mjs --approve <file...>          add the @approved marker (a human's act — see SKILL.md)
@@ -36,6 +37,8 @@ import {
   tailOf,
   componentKey,
   isMarkedText,
+  deprecationOf,
+  DEPRECATED_RE,
   scanProject,
   resolveImportKey,
   IMPORT_FROM_RE,
@@ -263,7 +266,17 @@ function addedMarkers(range) {
     console.log('   Needs-you item, naming who asked for it.');
   }
 
-  return found.size > 0 || weakened.length > 0 || exceptions.size > 0 || owners.size > 0 ? 1 : 0;
+  const deprecations = found.deprecations;
+  if (deprecations.size > 0) {
+    console.log('');
+    console.log(`== @deprecated markers changed in ${range}`);
+    for (const [f, how] of [...deprecations].sort()) console.log(`  ${f}  (${how})`);
+    console.log('');
+    console.log('   Deprecating a component, or lifting a deprecation, is a human decision.');
+    console.log('   Report each as a Needs-you item, naming who asked for it.');
+  }
+
+  return found.size > 0 || weakened.length > 0 || exceptions.size > 0 || owners.size > 0 || deprecations.size > 0 ? 1 : 0;
 }
 
 // A marker counts only where it confers approval: a marker comment within the
@@ -278,6 +291,16 @@ function markerLines(text) {
     .split(/\r?\n/)
     .slice(0, MARKER_WINDOW)
     .filter((l) => MARKER_RE.test(l))
+    .map((l) => l.trim());
+}
+
+function deprecationLines(text) {
+  if (text == null) return [];
+  return text
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .slice(0, MARKER_WINDOW)
+    .filter((l) => DEPRECATED_RE.test(l))
     .map((l) => l.trim());
 }
 
@@ -301,12 +324,20 @@ function markersAdded(range) {
   const before = readAtRev(ends.base);
   const after = ends.head === null ? readWorkingFile : readAtRev(ends.head);
   const found = new Set();
+  const deprecations = new Map(); // file -> 'added' | 'removed' | 'changed'
   for (const f of names) {
-    const now = markerLines(after(f));
-    if (now.length === 0) continue;
-    const was = new Set(markerLines(before(f)));
+    const textNow = after(f);
+    const textWas = before(f);
+    const now = markerLines(textNow);
+    const was = new Set(markerLines(textWas));
     if (now.some((l) => !was.has(l))) found.add(f);
+    // Deprecating or un-deprecating is a decision about the system either way:
+    // reported in both directions, and when the named replacement changes.
+    const dNow = deprecationLines(textNow).join('\n');
+    const dWas = deprecationLines(textWas).join('\n');
+    if (dNow !== dWas) deprecations.set(f, !dWas ? 'added' : !dNow ? 'removed' : 'changed');
   }
+  found.deprecations = deprecations;
   return found;
 }
 
@@ -411,7 +442,11 @@ function scanMode(root) {
 
 function registry(root) {
   const all = scanComponents(root);
-  const approvedList = all.filter((c) => c.approved).map((c) => c.key);
+  const approvedList = all.filter((c) => c.approved && !c.deprecated).map((c) => c.key);
+  const deprecatedList = all
+    .filter((c) => c.deprecated)
+    .sort((a, b) => b.usageCount - a.usageCount)
+    .map((c) => `${c.key.padEnd(44)} used in ${c.usageCount} file(s)${c.replacement ? `  -> ${c.replacement}` : ''}`);
   const used = all.filter((c) => c.status === 'unmarked-in-use');
   const unusedCount = all.filter((c) => c.status === 'unmarked-unused').length;
   const usedList = used.map((u) => `${u.key.padEnd(44)} used in ${u.usageCount} file(s)`);
@@ -431,6 +466,13 @@ function registry(root) {
     console.log('  (none)');
   }
   console.log('');
+  if (deprecatedList.length) {
+    console.log(`Deprecated (${deprecatedList.length})`);
+    deprecatedList.forEach((l) => console.log(`  ${l}`));
+    console.log('');
+    console.log('  Uses left to migrate. Once a count reaches 0, the component can be deleted.');
+    console.log('');
+  }
   console.log(`Unmarked and unimported: ${unusedCount} file(s) — not listed.`);
   console.log('  Nothing depends on them, so they are inventory rather than a decision.');
   return 0;
@@ -1311,9 +1353,12 @@ function lint(targets) {
   }
 
   const approved = new Set();
+  const deprecated = new Map(); // key -> replacement name or null
   for (const dir of existing) {
     for (const f of filesUnder(dir, COMPONENT_EXTS)) {
       if (isMarked(f)) approved.add(componentKey(dir, f));
+      const d = deprecationOf(readLines(f).join('\n'));
+      if (d) deprecated.set(componentKey(dir, f), d.replacement);
     }
   }
 
@@ -1326,8 +1371,25 @@ function lint(targets) {
   }
 
   const unapproved = new Set();
+  const outgoing = new Set();
   for (const hit of importsIn(files)) {
-    if (!approved.has(hit.key)) unapproved.add(`${hit.file}  ->  ${hit.key}`);
+    // Deprecation outranks approval, and one finding per use is enough.
+    if (deprecated.has(hit.key)) {
+      const use = deprecated.get(hit.key);
+      outgoing.add(`${hit.file}  ->  ${hit.key}${use ? `  (use ${use} instead)` : ''}`);
+    } else if (!approved.has(hit.key)) {
+      unapproved.add(`${hit.file}  ->  ${hit.key}`);
+    }
+  }
+
+  if (outgoing.size > 0) {
+    console.log('== deprecated component in use');
+    [...outgoing].sort().forEach((l) => console.log(l));
+    console.log('');
+    console.log('   Marked @deprecated in its own file: the team is phasing it out. Move each use');
+    console.log('   to the replacement. If there is none, or it does not fit, park it.');
+    console.log('');
+    hits = 1;
   }
 
   if (unapproved.size > 0) {

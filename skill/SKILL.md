@@ -43,6 +43,22 @@ The reason is the whole point of the check: an agent that can mark components ap
 
 If a task needs a component that isn't approved, say so. Do not reach for the marker to make the flag disappear.
 
+### Deprecated components
+
+A component on its way out carries `@deprecated` in the same 5-line window, optionally naming its replacement:
+
+```tsx
+// @approved
+// @deprecated → NewCard
+export function Card(...) { ... }
+```
+
+`/** @deprecated use NewCard */` works too. Deprecation outranks approval:
+
+- **Never use a deprecated component in new work**, and replace it when you touch a file that does. Every import outside the component directories is flagged, with the replacement named. If there's no replacement, or it doesn't fit the case, park it: don't reach back for the deprecated one.
+- **Only the human deprecates, or lifts a deprecation.** The rules for `@approved` apply: add or remove the marker only when asked in that moment, and report it. `--added-markers` lists every deprecation added, lifted or changed.
+- Inside the component directories, a deprecated component may still be used while the migration happens.
+
 ### Every marker added during a task is reported
 
 Any `@approved` marker that appears in the diff is reported to the human: the file, the component, and who asked for it. **Report it even when the human did ask** — a report filed only when you judge it necessary is a report you can decide not to file, and an agent that added a marker it shouldn't have is exactly the one that would judge it unnecessary.

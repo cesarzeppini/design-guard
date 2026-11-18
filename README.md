@@ -42,12 +42,24 @@ No registry page to maintain, no list to keep in sync. The approved set is whate
 
 The config gets the same treatment. Ignoring a directory in `design-guard.config` silences it just as surely as approving everything in it, so `--added-markers` also reports config edits that narrow the check: a directory added to `components-ignore`, one removed from `components`, or `typography-base` switched off. It also reports any change to `allowed-customization.md`: an exception written there is approval too, so only a human adds one.
 
+### Phasing a component out
+
+Approval has one more state: `@deprecated`, in the same 5-line window, optionally naming the replacement.
+
+```tsx
+// @approved
+// @deprecated → NewCard
+export function Card(...) { ... }
+```
+
+Every use of a deprecated component is flagged with its replacement, the registry and the /components page list it apart with its remaining usage count (the migration left), and `--added-markers` reports deprecations added, lifted or changed. Only a human deprecates.
+
 ## What it catches
 
 | # | Violation | Example |
 |---|---|---|
 | 1 | Raw HTML for core UI | `<button>`, `<input>`, `<div role="button" onClick>`, hand-rolled modals. A link styled as a button gets a warning that doesn't fail the check. |
-| 2 | Off-system component | a component with no `@approved` marker, a duplicate of one that has it, or a variant it doesn't have (`<Button variant="ghostly">`) |
+| 2 | Off-system component | a component with no `@approved` marker, a duplicate of one that has it, a variant it doesn't have (`<Button variant="ghostly">`), or a component marked `@deprecated` |
 | 3 | Appearance override on an approved component | `<Card className="bg-muted">` — **semantic tokens included** — or `<Button {...props}>`, which forwards any caller's `className` (form wiring like `{...field}` is allowed) |
 | 4 | Typography utilities on semantic elements | `<h1 className="text-2xl font-semibold">` when the base layer already styles `h1` |
 
@@ -98,7 +110,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: cesarzeppini/design-guard@v0.5.0
+      - uses: cesarzeppini/design-guard@v0.6.0
         with:
           path: src
 ```
@@ -110,7 +122,7 @@ On pull requests it also runs the **approvals check** (`--added-markers` against
 That failure is deliberate, even when a person really did ask for the approval. The check can't tell who asked, so it makes sure a human looks before merging. The intended flow is that the reviewer reads the summary, confirms each item was requested, and merges anyway. If a red check on every approval is too much, report it as a warning instead:
 
 ```yaml
-      - uses: cesarzeppini/design-guard@v0.5.0
+      - uses: cesarzeppini/design-guard@v0.6.0
         with:
           path: src
           fail-on-approvals: false   # list approvals in the summary, don't fail
@@ -189,7 +201,7 @@ node scripts/ds-lint.mjs --registry             # approved / in use / unused
 node scripts/ds-lint.mjs --scan                 # every component as JSON
 node scripts/ds-lint.mjs --approve <file...>    # add the @approved marker
 node scripts/ds-lint.mjs --unapprove <file...>  # remove it
-node scripts/ds-lint.mjs --added-markers main...HEAD  # markers, narrowed config, exceptions, CODEOWNERS
+node scripts/ds-lint.mjs --added-markers main...HEAD  # markers, deprecations, narrowed config, exceptions, CODEOWNERS
 node scripts/ds-lint.mjs --codeowners @org/team     # CODEOWNERS lines for everything that decides approval
 ```
 
