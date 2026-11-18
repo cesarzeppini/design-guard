@@ -1247,3 +1247,102 @@ test('a spread inside a component directory is composition, not a finding', () =
   assert.doesNotMatch(out, /props spread onto a design-system component/);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---- variant / size values a component doesn't declare ----
+// <Button variant="ghostly"> passed every check: approved component, no override.
+// The value just isn't one Button has, so it silently renders the default.
+
+const CVA_BUTTON = [
+  '// @approved',
+  'import { cva, type VariantProps } from "class-variance-authority";',
+  'const buttonVariants = cva("inline-flex", {',
+  '  variants: {',
+  '    variant: { default: "bg-primary", outline: "border", ghost: "hover:bg-accent" },',
+  '    size: { default: "h-9", sm: "h-8", lg: "h-10", icon: "size-9" },',
+  '  },',
+  '  defaultVariants: { variant: "default", size: "default" },',
+  '});',
+  'export interface ButtonProps extends VariantProps<typeof buttonVariants> { asChild?: boolean }',
+  'export function Button({ variant, size, ...props }: ButtonProps) { return null; }',
+].join('\n');
+
+const VARIANT_BASE = {
+  'design-guard.config': 'components: src/components/ui\ntypography-base: false\n',
+  'src/components/ui/button.tsx': CVA_BUTTON,
+  'src/components/ui/badge.tsx': '// @approved\ntype Tone = "info" | "warn";\nexport function Badge({ variant }: { variant?: Tone }) { return null; }\n',
+};
+
+const variantLines = (out, file) => out.split('\n').filter((l) => l.startsWith(file));
+
+test('flags variant and size values a component does not declare (cva and string union)', () => {
+  const root = project({
+    ...VARIANT_BASE,
+    'src/routes/page.tsx': [
+      'import { Button } from "@/components/ui/button";',
+      'import { Badge as Tag } from "@/components/ui/badge";',
+      'export const P = () => (<>',
+      '  <Button variant="ghostly">a</Button>',
+      '  <Button variant="ghost" size="xl">b</Button>',
+      '  <Button variant={"outline"} size=\'icon\'>c</Button>',
+      '  <Button variant={\'destructive\'}>d</Button>',
+      '  <Tag variant="error" />',
+      '  <Tag variant="warn" />',
+      '</>);',
+    ].join('\n'),
+  });
+  const { code, out } = run(root, ['src/routes']);
+  assert.equal(code, 1);
+  assert.match(out, /variant or size the component doesn't declare/);
+  assert.deepEqual(variantLines(out, 'src/routes/page.tsx'), [
+    'src/routes/page.tsx:4: <Button> variant="ghostly" — declared: default, outline, ghost',
+    'src/routes/page.tsx:5: <Button> size="xl" — declared: default, sm, lg, icon',
+    'src/routes/page.tsx:7: <Button> variant="destructive" — declared: default, outline, ghost',
+    'src/routes/page.tsx:8: <Tag> variant="error" — declared: info, warn',
+  ]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('variant check stays silent when it cannot be sure', () => {
+  const root = project({
+    ...VARIANT_BASE,
+    // values not readable from the file
+    'src/components/ui/chip.tsx': '// @approved\nimport type { ButtonProps } from "./button";\nexport function Chip({ variant }: { variant?: ButtonProps["variant"] }) { return null; }\n',
+    // two cva blocks: no telling which export owns which
+    'src/components/ui/toggle.tsx': '// @approved\nconst a = cva("", { variants: { variant: { on: "" } } });\nconst b = cva("", { variants: { variant: { off: "" } } });\nexport function Toggle() { return null; }\nexport function ToggleItem() { return null; }\n',
+    'src/routes/page.tsx': [
+      'import { Button } from "@/components/ui/button";',
+      'import { Badge } from "@/components/ui/badge";',
+      'import { Chip } from "@/components/ui/chip";',
+      'import { Toggle, ToggleItem } from "@/components/ui/toggle";',
+      'export const P = ({ v }: any) => (<>',
+      '  <Button variant={v} size={`${v}`}>dynamic</Button>',
+      '  <Button data-variant="nope" render={() => <Other variant="nope" />}>not this tag\'s</Button>',
+      '  <Badge size="huge" />',
+      '  <Chip variant="anything" />',
+      '  <Toggle variant="off" /><ToggleItem variant="on" />',
+      '  <Thing variant="whatever" />',
+      '</>);',
+    ].join('\n'),
+  });
+  const { out } = run(root, ['src/routes']);
+  assert.doesNotMatch(out, /variant or size the component doesn't declare/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('variant check passes the demo project without new findings', () => {
+  const demo = join(dirname(SCRIPT), '..', 'examples', 'demo');
+  const { out } = run(demo, ['src']);
+  assert.doesNotMatch(out, /variant or size the component doesn't declare/);
+});
+
+test('scan: an indexed or non-union variant type declares no values', () => {
+  const root = project({
+    'design-guard.config': 'components: src/components/ui\n',
+    'src/components/ui/chip.tsx': '// @approved\nexport function Chip({ variant }: { variant?: ButtonProps["variant"] }) { return null; }\n',
+    'src/components/ui/pill.tsx': '// @approved\nexport function Pill({ size }: { size?: "sm" | "lg" | undefined }) { return null; }\n',
+  });
+  const by = Object.fromEntries(scan(root, ['src']).map((c) => [c.name, c]));
+  assert.deepEqual(by.Chip.variants, {});
+  assert.deepEqual(by.Pill.variants.size, ['sm', 'lg']);
+  rmSync(root, { recursive: true, force: true });
+});

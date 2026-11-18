@@ -16,7 +16,7 @@ These affect position and size only, never appearance:
 
 ## Props — allowed
 
-- `variant` and `size`, limited to the values the component's own type union declares. Inventing a value the union doesn't contain is a violation, not a customization.
+- `variant` and `size`, limited to the values the component itself declares (its type union or its `cva` `variants:` block). Inventing a value it doesn't declare is a violation, not a customization, and the linter flags it. If no declared value fits, park it and propose the variant.
 - behavioral / a11y props the component declares: `disabled`, `type`, `asChild`, `open`, `onOpenChange`, `value`, `onValueChange`, `aria-*`, `id`, `name`, `placeholder`, `required`
 - event handlers
 

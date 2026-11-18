@@ -901,6 +901,103 @@ function spreadHits(files) {
   return found;
 }
 
+// ---- variant / size values a component doesn't declare ----
+//
+// `<Button variant="ghostly">` passes every other check: Button is approved and no
+// class is overridden. But "ghostly" isn't one of Button's variants, so it renders
+// the default (or nothing sensible) while reading as a deliberate choice. The
+// declared values come from the component's own source (string unions on the
+// variant/size props, or a cva `variants:` block), read by scan-core.
+//
+// Silent when it can't be sure: a dynamic value (`variant={v}`), a component whose
+// values can't be read (imported from elsewhere, `ButtonProps['variant']`), or a
+// file with several `variants:` blocks, where there's no telling which belongs to
+// which export.
+const CHECKED_GROUPS = ['variant', 'size'];
+
+function declaredVariants() {
+  const files = {};
+  for (const dir of COMPONENT_DIRS.filter(isDir)) {
+    for (const f of filesUnder(dir, COMPONENT_EXTS)) files[f] = readWorkingFile(f) ?? '';
+  }
+  const out = new Map(); // component key -> { variant: [...], size: [...] }
+  for (const c of scanProject({ files, componentDirs: COMPONENT_DIRS.filter(isDir) })) {
+    if ((files[c.file].match(/\bvariants\s*:\s*\{/g) || []).length > 1) continue;
+    out.set(c.key, c.variants);
+  }
+  return out;
+}
+
+// Local tag name -> component key, for imports from a configured component directory.
+function systemImportsIn(file) {
+  const tags = new Map();
+  if (!KEY_RE) return tags;
+  const text = readLines(file).join('\n');
+  for (const m of text.matchAll(/import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']/g)) {
+    const key = (m[2].match(KEY_RE) || [null])[0];
+    if (!key) continue;
+    for (const spec of m[1].split(',')) {
+      const name = (spec.split(/\s+as\s+/).pop() || '').trim();
+      if (/^[A-Z]/.test(name)) tags.set(name, key);
+    }
+  }
+  return tags;
+}
+
+// The tag body with every brace group removed except a lone string literal
+// (`{"ghost"}`), so a prop on a nested element inside an expression
+// (`render={() => <X variant="a" />}`) isn't read as this tag's.
+function topLevelAttrs(body) {
+  let out = '';
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === '}') {
+      depth--;
+      if (depth === 0) {
+        const inner = body.slice(start, i + 1);
+        out += /^\{\s*(["'])[^"'{}]*\1\s*\}$/.test(inner) ? inner : '{}';
+      }
+    } else if (depth === 0) {
+      out += c;
+    }
+  }
+  return out;
+}
+
+const VARIANT_ATTR_RE = /(?:^|\s)(variant|size)=(?:"([^"]*)"|'([^']*)'|\{\s*["']([^"']*)["']\s*\})/g;
+
+function variantHits(files) {
+  const found = [];
+  let declared = null; // read the component directories once, only if needed
+  for (const f of files) {
+    const imports = systemImportsIn(f);
+    if (imports.size === 0) continue;
+    declared ??= declaredVariants();
+    const text = readLines(f).join('\n');
+    OPEN_TAG_RE.lastIndex = 0;
+    let m;
+    while ((m = OPEN_TAG_RE.exec(text))) {
+      const key = imports.get(m[1]);
+      const groups = key && declared.get(key);
+      if (!groups) continue;
+      const line = text.slice(0, m.index).split('\n').length;
+      for (const a of topLevelAttrs(tagBodyAt(text, OPEN_TAG_RE.lastIndex)).matchAll(VARIANT_ATTR_RE)) {
+        const [, group] = a;
+        const value = a[2] ?? a[3] ?? a[4];
+        const allowed = groups[group];
+        if (!CHECKED_GROUPS.includes(group) || !allowed?.length || allowed.includes(value)) continue;
+        found.push(`${f}:${line}: <${m[1]}> ${group}="${value}" — declared: ${allowed.join(', ')}`);
+      }
+    }
+  }
+  return found;
+}
+
 function unlistedComponentDirs() {
   // Component directories the project has but `components:` doesn't list. Without
   // this, an incomplete key narrows the check silently: an unlisted directory is
@@ -995,6 +1092,17 @@ function lint(targets) {
       console.log('   stops once the decision is written down.');
       console.log('');
     }
+  }
+
+  const variants = variantHits(files);
+  if (variants.length) {
+    console.log("== variant or size the component doesn't declare");
+    variants.forEach((l) => console.log(l));
+    console.log('');
+    console.log('   Use one of the declared values. If none fits, that is the finding: park it');
+    console.log('   and propose the variant, rather than passing a value the component ignores.');
+    console.log('');
+    hits = 1;
   }
 
   const spreads = spreadHits(files);

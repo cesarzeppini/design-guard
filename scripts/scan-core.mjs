@@ -125,13 +125,19 @@ function variantsOf(src, props) {
     out[group] = [...new Set([...(out[group] || []), ...vals])];
   };
 
+  // Only a union made of string literals (plus undefined/null) declares values.
+  // Anything else that merely contains a string, like `ButtonProps["variant"]`,
+  // would otherwise read "variant" as a value.
+  const literalUnion = (t) => {
+    const parts = t.split('|').map((x) => x.trim()).filter(Boolean);
+    return parts.length > 0 && parts.every((x) => /^(["'])[^"'\n]*\1$/.test(x) || /^(undefined|null)$/.test(x));
+  };
   const aliasValues = (typeText) => {
-    const direct = stringLiterals(typeText);
-    if (direct.length) return direct;
+    if (literalUnion(typeText)) return stringLiterals(typeText);
     const id = typeText.match(/^[A-Za-z_]\w*$/);
     if (!id) return [];
     const alias = src.match(new RegExp(`type\\s+${id[0]}\\s*=\\s*([^;\\n{]+(?:\\n\\s*\\|[^;\\n]+)*)`));
-    return alias ? stringLiterals(alias[1]) : [];
+    return alias && literalUnion(alias[1]) ? stringLiterals(alias[1]) : [];
   };
   for (const p of props) if (p.name === 'variant' || p.name === 'size') add(p.name, aliasValues(p.type));
 
