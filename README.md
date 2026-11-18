@@ -97,8 +97,8 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: cesarzeppini/design-guard@v0.2.0
+      - uses: actions/checkout@v7
+      - uses: cesarzeppini/design-guard@v0.2.1
         with:
           path: src
 ```
@@ -110,7 +110,7 @@ On pull requests it also runs the **approvals check** (`--added-markers` against
 That failure is deliberate, even when a person really did ask for the approval. The check can't tell who asked, so it makes sure a human looks before merging. The intended flow is that the reviewer reads the summary, confirms each item was requested, and merges anyway. If a red check on every approval is too much, report it as a warning instead:
 
 ```yaml
-      - uses: cesarzeppini/design-guard@v0.2.0
+      - uses: cesarzeppini/design-guard@v0.2.1
         with:
           path: src
           fail-on-approvals: false   # list approvals in the summary, don't fail
